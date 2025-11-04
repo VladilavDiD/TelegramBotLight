@@ -4,7 +4,9 @@
     <option name="autoReloadType" value="SELECTIVE" />
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="daf64348-2031-4f25-ba8c-f28339a70498" name="Changes" comment="create new telegram bot for check light in home" />
+    <list default="true" id="daf64348-2031-4f25-ba8c-f28339a70498" name="Changes" comment="push it final">
+      <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
+    </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
     <option name="HIGHLIGHT_NON_ACTIVE_CHANGELIST" value="false" />
@@ -13,6 +15,18 @@
   <component name="Git.Settings">
     <option name="RECENT_GIT_ROOT_PATH" value="$PROJECT_DIR$" />
   </component>
+  <component name="GitHubPullRequestSearchHistory"><![CDATA[{
+  "lastFilter": {
+    "state": "OPEN",
+    "assignee": "VladilavDiD"
+  }
+}]]></component>
+  <component name="GithubPullRequestsUISettings"><![CDATA[{
+  "selectedUrlAndAccountId": {
+    "url": "https://github.com/VladilavDiD/TelegramBotLight.git",
+    "accountId": "085a0666-d79c-4484-a4f0-aa6e8b6eb0f3"
+  }
+}]]></component>
   <component name="ProjectColorInfo"><![CDATA[{
   "associatedIndex": 3
 }]]></component>
@@ -50,7 +64,7 @@
       <option name="number" value="Default" />
       <option name="presentableId" value="Default" />
       <updated>1762255700994</updated>
-      <workItem from="1762255702409" duration="1809000" />
+      <workItem from="1762255702409" duration="4614000" />
     </task>
     <task id="LOCAL-00001" summary="create new telegram bot for check light in home">
       <option name="closed" value="true" />
@@ -60,7 +74,15 @@
       <option name="project" value="LOCAL" />
       <updated>1762259871018</updated>
     </task>
-    <option name="localTasksCounter" value="2" />
+    <task id="LOCAL-00002" summary="push it final">
+      <option name="closed" value="true" />
+      <created>1762260272607</created>
+      <option name="number" value="00002" />
+      <option name="presentableId" value="LOCAL-00002" />
+      <option name="project" value="LOCAL" />
+      <updated>1762260272607</updated>
+    </task>
+    <option name="localTasksCounter" value="3" />
     <servers />
   </component>
   <component name="TypeScriptGeneratedFilesManager">
@@ -79,6 +101,7 @@
   </component>
   <component name="VcsManagerConfiguration">
     <MESSAGE value="create new telegram bot for check light in home" />
-    <option name="LAST_COMMIT_MESSAGE" value="create new telegram bot for check light in home" />
+    <MESSAGE value="push it final" />
+    <option name="LAST_COMMIT_MESSAGE" value="push it final" />
   </component>
 </project>
