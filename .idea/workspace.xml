@@ -4,7 +4,7 @@
     <option name="autoReloadType" value="SELECTIVE" />
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="daf64348-2031-4f25-ba8c-f28339a70498" name="Changes" comment="push it final">
+    <list default="true" id="daf64348-2031-4f25-ba8c-f28339a70498" name="Changes" comment="update some function, add new location Kyiv, Khmel and KP">
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
@@ -64,7 +64,7 @@
       <option name="number" value="Default" />
       <option name="presentableId" value="Default" />
       <updated>1762255700994</updated>
-      <workItem from="1762255702409" duration="4614000" />
+      <workItem from="1762255702409" duration="5528000" />
     </task>
     <task id="LOCAL-00001" summary="create new telegram bot for check light in home">
       <option name="closed" value="true" />
@@ -82,7 +82,15 @@
       <option name="project" value="LOCAL" />
       <updated>1762260272607</updated>
     </task>
-    <option name="localTasksCounter" value="3" />
+    <task id="LOCAL-00003" summary="update some function, add new location Kyiv, Khmel and KP">
+      <option name="closed" value="true" />
+      <created>1762263223764</created>
+      <option name="number" value="00003" />
+      <option name="presentableId" value="LOCAL-00003" />
+      <option name="project" value="LOCAL" />
+      <updated>1762263223764</updated>
+    </task>
+    <option name="localTasksCounter" value="4" />
     <servers />
   </component>
   <component name="TypeScriptGeneratedFilesManager">
@@ -102,6 +110,7 @@
   <component name="VcsManagerConfiguration">
     <MESSAGE value="create new telegram bot for check light in home" />
     <MESSAGE value="push it final" />
-    <option name="LAST_COMMIT_MESSAGE" value="push it final" />
+    <MESSAGE value="update some function, add new location Kyiv, Khmel and KP" />
+    <option name="LAST_COMMIT_MESSAGE" value="update some function, add new location Kyiv, Khmel and KP" />
   </component>
 </project>

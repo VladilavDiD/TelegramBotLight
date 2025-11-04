@@ -1,4 +1,3 @@
-
 import asyncio
 import logging
 import os
@@ -283,10 +282,11 @@ class ScheduleParser:
                             # Визначаємо статус
                             if any(word in style or word in classes for word in ['red', '#ff0000', '#f00', 'danger']):
                                 status = 'off'
-                            elif any(word in style or word in classes for word in ['green', '#00ff00', '#0f0', 'success']):
+                            elif any(word in style or word in classes for word in
+                                     ['green', '#00ff00', '#0f0', 'success']):
                                 status = 'on'
-                            elif any \
-                                    (word in style or word in classes for word in ['gray', 'grey', 'yellow', 'warning']):
+                            elif any(
+                                    word in style or word in classes for word in ['gray', 'grey', 'yellow', 'warning']):
                                 status = 'maybe'
                             elif 'відключення' in text or 'немає' in text:
                                 status = 'off'
@@ -294,7 +294,7 @@ class ScheduleParser:
                                 status = 'maybe'
 
                             schedule_data[group_num].append({
-                                'time': headers[i] if i < len(headers) else f"{ i *2:02d}:00-{( i * 2 +2):02d}:00",
+                                'time': headers[i] if i < len(headers) else f"{i * 2:02d}:00-{(i * 2 + 2):02d}:00",
                                 'status': status
                             })
 
@@ -376,6 +376,7 @@ def get_main_keyboard(user_city: str = "chernivtsi") -> InlineKeyboardMarkup:
     city_name = CITIES.get(user_city, {}).get('name', 'Чернівці')
     keyboard = [
         [InlineKeyboardButton(text="📊 Мій графік", callback_data="my_schedule")],
+        [InlineKeyboardButton(text="🔄 Оновити графік", callback_data="refresh_schedule")],
         [InlineKeyboardButton(text=f"🏙 Місто: {city_name}", callback_data="change_city")],
         [InlineKeyboardButton(text="⚙️ Змінити групу", callback_data="change_group")],
         [InlineKeyboardButton(text="🔔 Налаштування", callback_data="settings")],
@@ -446,12 +447,144 @@ async def cmd_start(message: Message):
     else:
         welcome_text += "Спочатку оберіть місто та групу відключень 👇"
 
-    await message.answer(welcome_text, reply_markup=get_main_keyboard(user.get('city', 'chernivtsi') if user else 'chernivtsi'))
+    await message.answer(welcome_text,
+                         reply_markup=get_main_keyboard(user.get('city', 'chernivtsi') if user else 'chernivtsi'))
+
+
+@router.message(Command("update"))
+async def cmd_update(message: Message):
+    """Команда для ручного оновлення графіків"""
+    await message.answer("⏳ Оновлюю графіки...")
+
+    bot = message.bot
+    await update_schedules(bot)
+
+    await message.answer("✅ Графіки оновлено!")
+
+
+@router.message(Command("debug"))
+async def cmd_debug(message: Message):
+    """Команда для відладки (показує збережені дані користувача)"""
+    user = UserManager.get_user(message.from_user.id)
+
+    if not user:
+        await message.answer("❌ Користувача не знайдено в базі даних")
+        return
+
+    debug_text = "🔍 Ваші дані в системі:\n\n"
+    debug_text += f"User ID: {user['user_id']}\n"
+    debug_text += f"Username: {user.get('username', 'N/A')}\n"
+    debug_text += f"Місто: {user.get('city', 'N/A')}\n"
+    debug_text += f"Група: {user.get('group_number', 'N/A')}\n"
+    debug_text += f"Сповіщення: {'✅' if user.get('notifications_enabled') else '❌'}\n"
+
+    # Перевіряємо чи є графік
+    if user.get('group_number') and user.get('city'):
+        today = datetime.now().strftime("%Y-%m-%d")
+        schedule_data = ScheduleParser.get_schedule(user['city'], user['group_number'], today)
+        debug_text += f"\nГрафік в БД: {'✅ Є' if schedule_data else '❌ Немає'}"
+
+    await message.answer(debug_text)
 
 
 @router.callback_query(F.data == "my_schedule")
 async def show_schedule(callback: CallbackQuery):
     await callback.answer()
+
+    user = UserManager.get_user(callback.from_user.id)
+
+    # Детальне логування для діагностики
+    logger.info(f"User {callback.from_user.id} requested schedule. User data: {user}")
+
+    if not user:
+        logger.warning(f"User {callback.from_user.id} not found in database")
+        await callback.message.answer(
+            "❌ Помилка: користувача не знайдено в базі даних.\n"
+            "Спробуйте /start",
+            reply_markup=get_cities_keyboard()
+        )
+        return
+
+    if not user.get('group_number'):
+        logger.warning(f"User {callback.from_user.id} has no group number")
+        await callback.message.answer(
+            "❌ Спочатку оберіть місто та групу відключень",
+            reply_markup=get_cities_keyboard()
+        )
+        return
+
+    city = user.get('city', 'chernivtsi')
+    group_num = user['group_number']
+    city_name = CITIES.get(city, {}).get('name', 'Чернівці')
+
+    logger.info(f"Fetching schedule for city={city}, group={group_num}")
+
+    # Отримуємо графік
+    today = datetime.now().strftime("%Y-%m-%d")
+    schedule_data = ScheduleParser.get_schedule(city, group_num, today)
+
+    if not schedule_data:
+        logger.warning(f"No schedule found for city={city}, group={group_num}, date={today}")
+
+        # Спробуємо оновити графік прямо зараз
+        await callback.message.answer("⏳ Завантажую актуальний графік...")
+
+        try:
+            schedules = await ScheduleParser.fetch_schedule(city)
+            if schedules and group_num in schedules:
+                schedule_json = json.dumps(schedules[group_num], ensure_ascii=False)
+                ScheduleParser.save_schedule(city, group_num, today, schedule_json)
+                schedule_data = schedule_json
+                logger.info(f"Schedule fetched and saved for city={city}, group={group_num}")
+            elif schedules is not None and not schedules:
+                # Порожній графік - немає відключень
+                schedule_json = json.dumps([], ensure_ascii=False)
+                ScheduleParser.save_schedule(city, group_num, today, schedule_json)
+                schedule_data = schedule_json
+                logger.info(f"Empty schedule saved (no outages) for city={city}, group={group_num}")
+        except Exception as e:
+            logger.error(f"Error fetching schedule: {e}", exc_info=True)
+
+        if not schedule_data:
+            await callback.message.answer(
+                f"📊 Графік для {city_name}, група {group_num} поки недоступний.\n\n"
+                "Можливо:\n"
+                "• Графік ще не оновлено\n"
+                "• Проблеми з сайтом енергопостачальника\n\n"
+                f"Перевірте на сайті:\n{CITIES[city]['schedule_url']}",
+                reply_markup=get_main_keyboard(city)
+            )
+            return
+
+    # Парсимо і форматуємо
+    try:
+        schedule = json.loads(schedule_data)
+        text = format_schedule(schedule)
+        text = f"🏙 {city_name}\n⚡️ Група {group_num}\n\n" + text
+
+        # Додаємо час останнього оновлення
+        with get_db() as conn:
+            updated = conn.execute(
+                "SELECT updated_at FROM schedules WHERE city = ? AND group_number = ? AND date = ?",
+                (city, group_num, today)
+            ).fetchone()
+            if updated:
+                text += f"\n\n🕐 Оновлено: {updated['updated_at']}"
+
+        await callback.message.answer(text, reply_markup=get_main_keyboard(city))
+        logger.info(f"Schedule sent successfully to user {callback.from_user.id}")
+    except json.JSONDecodeError as e:
+        logger.error(f"JSON decode error for schedule: {e}")
+        await callback.message.answer(
+            "❌ Помилка читання графіку. Спробуйте пізніше.",
+            reply_markup=get_main_keyboard(city)
+        )
+
+
+@router.callback_query(F.data == "refresh_schedule")
+async def refresh_schedule(callback: CallbackQuery):
+    """Оновлення графіку для конкретного користувача"""
+    await callback.answer("⏳ Оновлюю...")
 
     user = UserManager.get_user(callback.from_user.id)
 
@@ -466,30 +599,41 @@ async def show_schedule(callback: CallbackQuery):
     group_num = user['group_number']
     city_name = CITIES.get(city, {}).get('name', 'Чернівці')
 
-    # Отримуємо графік
-    today = datetime.now().strftime("%Y-%m-%d")
-    schedule_data = ScheduleParser.get_schedule(city, group_num, today)
-
-    if not schedule_data:
-        await callback.message.answer(
-            f"📊 Графік для {city_name}, група {group_num} поки недоступний.\n\n"
-            "Можливо:\n"
-            "• Графік ще не оновлено\n"
-            "• Наразі відключень немає\n"
-            "• Проблеми з сайтом енергопостачальника\n\n"
-            f"Перевірте на сайті:\n{CITIES[city]['schedule_url']}"
-        )
-        return
-
-    # Парсимо і форматуємо
     try:
-        schedule = json.loads(schedule_data)
-        text = format_schedule(schedule)
-        text = f"🏙 {city_name}\n⚡️ Група {group_num}\n\n" + text
-        await callback.message.answer(text, reply_markup=get_main_keyboard(city))
-    except json.JSONDecodeError:
+        schedules = await ScheduleParser.fetch_schedule(city)
+        today = datetime.now().strftime("%Y-%m-%d")
+
+        if schedules and group_num in schedules:
+            schedule_json = json.dumps(schedules[group_num], ensure_ascii=False)
+            ScheduleParser.save_schedule(city, group_num, today, schedule_json)
+
+            schedule = schedules[group_num]
+            text = format_schedule(schedule)
+            text = f"🏙 {city_name}\n⚡️ Група {group_num}\n\n" + text
+            text += f"\n\n🕐 Оновлено щойно"
+
+            await callback.message.answer(text, reply_markup=get_main_keyboard(city))
+        elif schedules is not None and not schedules:
+            # Порожній графік
+            schedule_json = json.dumps([], ensure_ascii=False)
+            ScheduleParser.save_schedule(city, group_num, today, schedule_json)
+
+            await callback.message.answer(
+                f"🏙 {city_name}\n⚡️ Група {group_num}\n\n"
+                "✅ Чудові новини! Сьогодні планових відключень для вашої групи немає!\n\n"
+                "🕐 Оновлено щойно",
+                reply_markup=get_main_keyboard(city)
+            )
+        else:
+            await callback.message.answer(
+                f"❌ Не вдалося завантажити графік для {city_name}\n"
+                "Спробуйте пізніше або перевірте на сайті",
+                reply_markup=get_main_keyboard(city)
+            )
+    except Exception as e:
+        logger.error(f"Error refreshing schedule: {e}", exc_info=True)
         await callback.message.answer(
-            "❌ Помилка читання графіку. Спробуйте пізніше.",
+            "❌ Помилка оновлення графіку. Спробуйте пізніше.",
             reply_markup=get_main_keyboard(city)
         )
 
@@ -510,13 +654,27 @@ async def select_city(callback: CallbackQuery):
     city_id = callback.data.split("_")[1]
     city_name = CITIES.get(city_id, {}).get('name', 'Невідоме місто')
 
+    # Спочатку оновлюємо місто
     UserManager.update_city(callback.from_user.id, city_id)
 
-    await callback.message.answer(
-        f"✅ Місто {city_name} встановлено!\n\n"
-        "Тепер оберіть групу відключень:",
-        reply_markup=get_groups_keyboard()
-    )
+    # Перевіряємо чи є вже збережена група для цього міста
+    user_cities = UserManager.get_user_cities(callback.from_user.id)
+    existing_group = next((uc['group_number'] for uc in user_cities if uc['city'] == city_id), None)
+
+    if existing_group:
+        # Оновлюємо основну групу
+        UserManager.update_group(callback.from_user.id, existing_group)
+        await callback.message.answer(
+            f"✅ Місто {city_name} встановлено!\n"
+            f"⚡️ Ваша збережена група: {existing_group}",
+            reply_markup=get_main_keyboard(city_id)
+        )
+    else:
+        await callback.message.answer(
+            f"✅ Місто {city_name} встановлено!\n\n"
+            "Тепер оберіть групу відключень:",
+            reply_markup=get_groups_keyboard()
+        )
 
 
 @router.callback_query(F.data == "change_group")
@@ -534,10 +692,27 @@ async def select_group(callback: CallbackQuery):
 
     group_num = int(callback.data.split("_")[1])
     user = UserManager.get_user(callback.from_user.id)
-    city = user.get('city', 'chernivtsi') if user else 'chernivtsi'
+
+    # Якщо користувача немає - створюємо
+    if not user:
+        UserManager.save_user(
+            callback.from_user.id,
+            callback.from_user.username or "Unknown",
+            city="chernivtsi",
+            group_number=group_num
+        )
+        user = UserManager.get_user(callback.from_user.id)
+        logger.info(f"Created new user {callback.from_user.id} with group {group_num}")
+
+    city = user.get('city', 'chernivtsi')
     city_name = CITIES.get(city, {}).get('name', 'Чернівці')
 
+    # Оновлюємо групу
     UserManager.update_group(callback.from_user.id, group_num)
+
+    # Перевіряємо що збереглося
+    updated_user = UserManager.get_user(callback.from_user.id)
+    logger.info(f"User {callback.from_user.id} updated: {updated_user}")
 
     await callback.message.answer(
         f"✅ Налаштування збережено!\n\n"
@@ -586,8 +761,10 @@ async def show_help(callback: CallbackQuery):
 
     help_text = (
         "❓ Допомога\n\n"
-        "Команди:\n"
-        "/start - Головне меню\n\n"
+        "📋 Команди:\n"
+        "/start - Головне меню\n"
+        "/update - Оновити графіки вручну\n"
+        "/debug - Показати збережені налаштування\n\n"
         "🏙 Доступні міста:\n"
     )
 
@@ -595,9 +772,13 @@ async def show_help(callback: CallbackQuery):
         help_text += f"  • {city_data['name']}\n"
 
     help_text += (
-        "\nЯк дізнатися свою групу?\n"
+        "\n❓ Як дізнатися свою групу?\n"
         "Перейдіть на сайт енергопостачальника\n"
-        "вашого міста та введіть свою адресу."
+        "вашого міста та введіть свою адресу.\n\n"
+        "🔧 Якщо графік не показується:\n"
+        "1. Використайте /debug щоб перевірити налаштування\n"
+        "2. Спробуйте /update для оновлення графіків\n"
+        "3. Переоберіть місто та групу через меню"
     )
 
     user = UserManager.get_user(callback.from_user.id)
@@ -729,12 +910,16 @@ async def main():
 
     scheduler.start()
 
-    # Перше оновлення
-    await update_schedules(bot)
+    # Перше оновлення при запуску
+    logger.info("Виконую перше оновлення графіків...")
+    try:
+        await update_schedules(bot)
+        logger.info("Перше оновлення завершено успішно")
+    except Exception as e:
+        logger.error(f"Помилка при першому оновленні: {e}", exc_info=True)
 
     logger.info("Бот запущено!")
     await dp.start_polling(bot)
-
 
 if __name__ == "__main__":
     asyncio.run(main())
