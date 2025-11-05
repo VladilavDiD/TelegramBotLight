@@ -302,7 +302,10 @@ class ScheduleParser:
         try:
             async with async_playwright() as p:
                 try:
-                    browser = await p.chromium.launch(headless=True)
+                    browser = await p.chromium.launch(
+                        headless=True,
+                        executable_path=os.getenv("CHROMIUM_EXECUTABLE_PATH")
+                    )
                 except Exception as e:
                     logger.error(f"[Чернівці] Не вдалося запустити браузер Playwright. "
                                  f"Переконайтеся, що виконано 'playwright install'. Помилка: {e}")

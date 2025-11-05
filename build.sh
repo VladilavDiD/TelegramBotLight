@@ -3,6 +3,5 @@
 # Встановлюємо всі залежності з requirements.txt
 pip install -r requirements.txt
 
-# ВАЖЛИВО:
-# Встановлюємо Playwright-браузери ТА їхні системні залежності
-playwright install --with-deps chromium
+echo "Build script finished. Python dependencies installed."
+echo "Chromium browser should be provided by Nixpacks."
