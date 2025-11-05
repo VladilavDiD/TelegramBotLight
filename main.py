@@ -293,22 +293,37 @@ class ScheduleParser:
     @staticmethod
     async def _parse_chernivtsi(city_data: dict) -> Optional[Dict[int, List[Dict]]]:
         """
-        ВИПРАВЛЕНО: Використання Playwright для парсингу динамічного сайту Чернівціобленерго,
-        оскільки графіки завантажуються через JavaScript.
+        ВИПРАВЛЕНО: Використання Playwright з явним шляхом до браузера
+        (наданим Railway) та додаванням діагностичного логування.
         """
         url = city_data['schedule_url']
         logger.info("[Чернівці] Запуск парсингу з Playwright...")
 
         try:
             async with async_playwright() as p:
+
+                # --- НОВИЙ БЛОК ДІАГНОСТИКИ ---
+                executable_path = os.getenv("CHROMIUM_EXECUTABLE_PATH")
+                logger.info(f"[Чернівці] DEBUG: Змінна CHROMIUM_EXECUTABLE_PATH = {executable_path}")
+
+                if not executable_path:
+                    logger.error("[Чернівці] КРИТИЧНА ПОМИЛКА: Змінна CHROMIUM_EXECUTABLE_PATH не встановлена (None).")
+                    logger.error(
+                        "[Чернівці] Переконайтеся, що змінна NIXPACKS_PROVIDERS=chromium коректно збережена на Railway.")
+                    return None
+                # --- КІНЕЦЬ БЛОКУ ДІАГНОСТИКИ ---
+
                 try:
+                    # ВАЖЛИВО: Кажемо Playwright використовувати браузер,
+                    # який встановив Railway (Nixpacks)
                     browser = await p.chromium.launch(
                         headless=True,
-                        executable_path=os.getenv("CHROMIUM_EXECUTABLE_PATH")
+                        executable_path=executable_path
                     )
                 except Exception as e:
-                    logger.error(f"[Чернівці] Не вдалося запустити браузер Playwright. "
-                                 f"Переконайтеся, що виконано 'playwright install'. Помилка: {e}")
+                    # Покращене логування помилки запуску
+                    logger.error(f"[Чернівці] Помилка під час запуску p.chromium.launch. Шлях: {executable_path}",
+                                 exc_info=True)
                     return None
 
                 page = await browser.new_page()
@@ -319,7 +334,7 @@ class ScheduleParser:
                 })
 
                 try:
-                    # Йдемо на сторінку
+                    # Йдемо на сторінку (таймаут 90 сек)
                     await page.goto(url, wait_until="domcontentloaded", timeout=90000)
                 except Exception as e:
                     logger.error(f"[Чернівці] Не вдалося завантажити сторінку: {e}")
@@ -327,14 +342,11 @@ class ScheduleParser:
                     return None
 
                 try:
-                    # КЛЮЧОВИЙ КРОК: Чекаємо на появу першої групи,
-                    # це індикатор, що JavaScript відпрацював
-                    # Cайт використовує id="inf1", "inf2" і т.д.
+                    # Чекаємо на появу першої групи (таймаут 90 сек)
                     await page.wait_for_selector("div#inf1", timeout=90000)
                     logger.info("[Чернівці] Динамічний контент (div#inf1) завантажено.")
                 except PlaywrightTimeoutError:
                     logger.error("[Чернівці] Timeout: Графік не завантажився на сторінці (div#inf1 не знайдено).")
-                    # Зберігаємо скріншот для відладки, якщо папка /tmp існує
                     try:
                         await page.screenshot(path='/tmp/chernivtsi_timeout_debug.png')
                         logger.info("[Чернівці] Скріншот збережено в /tmp/chernivtsi_timeout_debug.png")
@@ -347,19 +359,15 @@ class ScheduleParser:
                 html = await page.content()
                 await browser.close()
 
-            # Тепер передаємо цей HTML в BeautifulSoup, як у вашому оригінальному коді
+            # --- Подальша логіка парсингу (без змін) ---
             logger.info(f"[Чернівці] HTML отримано (з Playwright), довжина: {len(html)} символів")
             soup = BeautifulSoup(html, 'html.parser')
 
-            # --- Подальша логіка парсингу (взята з вашого коду) ---
-
             time_headers = []
-            # Cайт використовує id="gsv" для блоку з часом
             time_container = soup.find('div', {'id': 'gsv'})
 
             if time_container:
                 logger.info("[Чернівці] Знайдено контейнер з id='gsv'")
-                # Час в тегах <b> всередині gsv
                 time_elements = time_container.find_all('b')
                 logger.info(f"[Чернівці] Знайдено {len(time_elements)} елементів <b> з часом")
 
@@ -368,7 +376,6 @@ class ScheduleParser:
                     hour_match = re.search(r'(\d{1,2}):\d{2}', text)
                     if hour_match:
                         hour = int(hour_match.group(1))
-                        # Формуємо 30-хвилинні інтервали
                         time_headers.append(f"{hour:02d}:00-{hour:02d}:30")
                         time_headers.append(f"{hour:02d}:30-{(hour + 1) % 24:02d}:00")
 
@@ -384,7 +391,6 @@ class ScheduleParser:
 
             logger.info(f"[Чернівці] Знайдено {len(time_headers)} часових інтервалів")
 
-            # Парсимо графіки груп (ваша оригінальна логіка)
             schedule_data = {}
             for group_num in range(1, city_data['groups'] + 1):
                 group_div = soup.find('div', {'id': f'inf{group_num}'})
@@ -396,7 +402,6 @@ class ScheduleParser:
                 logger.info(f"[Чернівці] Обробка групи {group_num}")
                 schedule_data[group_num] = []
 
-                # Ваша оригінальна логіка пошуку тегів статусу (u - on, o - off, s - maybe)
                 cells = []
                 for tag in group_div.descendants:
                     if hasattr(tag, 'name') and tag.name in ['u', 'o', 's']:
@@ -409,7 +414,7 @@ class ScheduleParser:
 
                 for idx, cell in enumerate(cells):
                     if idx >= len(time_headers):
-                        break  # Уникнення помилки, якщо статусів більше, ніж заголовків часу
+                        break
 
                     tag_name = cell.name
                     if tag_name == 'u':
@@ -419,7 +424,7 @@ class ScheduleParser:
                     elif tag_name == 's':
                         status = 'maybe'
                     else:
-                        status = 'on'  # Default
+                        status = 'on'
 
                     schedule_data[group_num].append({
                         'time': time_headers[idx],
