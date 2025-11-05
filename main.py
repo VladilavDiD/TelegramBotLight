@@ -32,7 +32,7 @@ logger = logging.getLogger(__name__)
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 if not BOT_TOKEN:
     logger.warning("BOT_TOKEN не встановлено у змінних середовища. Використовується заглушка.")
-    BOT_TOKEN = "YOUR_BOT_TOKEN_HERE"
+    BOT_TOKEN = "8264057355:AAGgZMq5_2lNJRs5JV8KudlPyiQv6iKj_Sk"
 
 DATABASE_PATH = "bot_database.db"
 
