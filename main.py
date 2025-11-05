@@ -289,52 +289,106 @@ class ScheduleParser:
 
     @staticmethod
     async def _parse_chernivtsi(city_data: dict) -> Optional[Dict[int, List[Dict]]]:
-        """ОНОВЛЕНО: Додано посилені заголовки для більшої надійності"""
+        """ВИПРАВЛЕНО: Покращений парсер з детальним логуванням"""
         try:
             url = city_data['schedule_url']
             headers = {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-                'Accept-Language': 'uk-UA,uk;q=0.9',
-                'Referer': url,
-                'Cache-Control': 'no-cache'  # Запобігаємо кешуванню
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+                'Accept-Language': 'uk-UA,uk;q=0.9,en-US;q=0.8,en;q=0.7',
+                'Accept-Encoding': 'gzip, deflate, br',
+                'Connection': 'keep-alive',
+                'Upgrade-Insecure-Requests': '1',
+                'Cache-Control': 'no-cache',
+                'Pragma': 'no-cache'
             }
 
             async with aiohttp.ClientSession() as session:
                 async with session.get(url, headers=headers, timeout=30) as response:
                     if response.status != 200:
-                        logger.error(f"HTTP {response.status} для Чернівців")
+                        logger.error(f"[Чернівці] HTTP {response.status}")
                         return None
 
                     html = await response.text()
+
+                    # Додаткове логування для діагностики
+                    logger.info(f"[Чернівці] HTML отримано, довжина: {len(html)} символів")
+
                     soup = BeautifulSoup(html, 'html.parser')
 
-                    # 1. Отримуємо загальний список часових інтервалів
+                    # ВАРІАНТ 1: Пошук через div з id="gsv" (оригінальна логіка)
                     time_headers = []
                     time_container = soup.find('div', {'id': 'gsv'})
+
                     if time_container:
-                        for time_block in time_container.find_all('b', string=re.compile(r'\d{1,2}:\d{2}', re.I)):
-                            hour_match = re.search(r'(\d{1,2}):\d{2}', time_block.get_text(strip=True))
+                        logger.info("[Чернівці] Знайдено контейнер з id='gsv'")
+                        # Шукаємо всі часові мітки
+                        time_elements = time_container.find_all('b')
+                        logger.info(f"[Чернівці] Знайдено {len(time_elements)} елементів <b>")
+
+                        for time_block in time_elements:
+                            text = time_block.get_text(strip=True)
+                            hour_match = re.search(r'(\d{1,2}):\d{2}', text)
                             if hour_match:
                                 hour = int(hour_match.group(1))
                                 time_headers.append(f"{hour:02d}:00-{hour:02d}:30")
-                                time_headers.append(f"{hour:02d}:30-{hour + 1:02d}:00" if hour < 23 else "23:30-00:00")
+                                time_headers.append(f"{hour:02d}:30-{(hour + 1) % 24:02d}:00")
+                    else:
+                        logger.warning("[Чернівці] Контейнер з id='gsv' НЕ знайдено")
+
+                        # ВАРІАНТ 2: Альтернативний пошук часових міток
+                        all_bold = soup.find_all('b', string=re.compile(r'\d{1,2}:\d{2}'))
+                        logger.info(f"[Чернівці] Альтернативний пошук: знайдено {len(all_bold)} часових міток")
+
+                        for time_block in all_bold:
+                            text = time_block.get_text(strip=True)
+                            hour_match = re.search(r'(\d{1,2}):\d{2}', text)
+                            if hour_match:
+                                hour = int(hour_match.group(1))
+                                time_headers.append(f"{hour:02d}:00-{hour:02d}:30")
+                                time_headers.append(f"{hour:02d}:30-{(hour + 1) % 24:02d}:00")
 
                     if not time_headers:
-                        logger.warning("[Чернівці] Часові інтервали не знайдено.")
+                        logger.error("[Чернівці] Часові інтервали не знайдено")
+                        # Зберігаємо HTML для аналізу
+                        with open('/tmp/chernivtsi_debug.html', 'w', encoding='utf-8') as f:
+                            f.write(html)
+                        logger.info("[Чернівці] HTML збережено в /tmp/chernivtsi_debug.html")
                         return None
 
-                    # 2. Парсимо графіки груп (1-12)
+                    logger.info(f"[Чернівці] Знайдено {len(time_headers)} часових інтервалів")
+
+                    # Парсимо графіки груп
                     schedule_data = {}
+
                     for group_num in range(1, city_data['groups'] + 1):
-                        group_div = soup.find('div', {'id': f'inf{group_num}'})
+                        # Спробуємо різні варіанти пошуку
+                        group_div = (
+                                soup.find('div', {'id': f'inf{group_num}'}) or
+                                soup.find('div', {'id': f'group{group_num}'}) or
+                                soup.find('div', {'class': re.compile(f'group.*{group_num}', re.I)})
+                        )
+
                         if not group_div:
+                            logger.warning(f"[Чернівці] Група {group_num} не знайдена")
                             continue
 
+                        logger.info(f"[Чернівці] Обробка групи {group_num}")
                         schedule_data[group_num] = []
 
-                        # Використовуємо .descendants для надійнішого пошуку всіх вкладених тегів u, o, s
-                        cells = [tag for tag in group_div.descendants if tag.name in ['u', 'o', 's']]
+                        # Шукаємо статусні теги (u, o, s)
+                        cells = []
+
+                        # ВАРІАНТ 1: Через descendants
+                        for tag in group_div.descendants:
+                            if hasattr(tag, 'name') and tag.name in ['u', 'o', 's']:
+                                cells.append(tag)
+
+                        # ВАРІАНТ 2: Якщо не знайшли через descendants, шукаємо прямо
+                        if not cells:
+                            cells = group_div.find_all(['u', 'o', 's'])
+
+                        logger.info(f"[Чернівці] Група {group_num}: знайдено {len(cells)} статусних комірок")
 
                         for idx, cell in enumerate(cells):
                             if idx >= len(time_headers):
@@ -342,6 +396,7 @@ class ScheduleParser:
 
                             tag_name = cell.name
 
+                            # Визначаємо статус
                             if tag_name == 'u':
                                 status = 'on'
                             elif tag_name == 'o':
@@ -356,12 +411,16 @@ class ScheduleParser:
                                 'status': status
                             })
 
-                    return schedule_data if schedule_data else None
+                    if not schedule_data:
+                        logger.error("[Чернівці] Жодної групи не оброблено")
+                        return None
+
+                    logger.info(f"[Чернівці] ✅ Успішно оброблено {len(schedule_data)} груп")
+                    return schedule_data
 
         except Exception as e:
-            logger.error(f"[Чернівці] Помилка парсингу: {e}", exc_info=True)
+            logger.error(f"[Чернівці] Критична помилка: {e}", exc_info=True)
             return None
-
     @staticmethod
     async def _parse_kyiv_dtek(city_data: dict, address: str) -> Optional[List[Dict]]:
         """ВИПРАВЛЕНО: Парсер для Києва (ДТЕК) з посиленими заголовками"""
