@@ -302,27 +302,13 @@ class ScheduleParser:
         try:
             async with async_playwright() as p:
 
-                # --- НОВИЙ БЛОК ДІАГНОСТИКИ ---
-                executable_path = os.getenv("CHROMIUM_EXECUTABLE_PATH")
-                logger.info(f"[Чернівці] DEBUG: Змінна CHROMIUM_EXECUTABLE_PATH = {executable_path}")
-
-                if not executable_path:
-                    logger.error("[Чернівці] КРИТИЧНА ПОМИЛКА: Змінна CHROMIUM_EXECUTABLE_PATH не встановлена (None).")
-                    logger.error(
-                        "[Чернівці] Переконайтеся, що змінна NIXPACKS_PROVIDERS=chromium коректно збережена на Railway.")
-                    return None
-                # --- КІНЕЦЬ БЛОКУ ДІАГНОСТИКИ ---
-
                 try:
-                    # ВАЖЛИВО: Кажемо Playwright використовувати браузер,
-                    # який встановив Railway (Nixpacks)
-                    browser = await p.chromium.launch(
-                        headless=True,
-                        executable_path=executable_path
-                    )
+                    # Просто запускаємо браузер, як завжди
+                    browser = await p.chromium.launch(headless=True)
+
                 except Exception as e:
                     # Покращене логування помилки запуску
-                    logger.error(f"[Чернівці] Помилка під час запуску p.chromium.launch. Шлях: {executable_path}",
+                    logger.error(f"[Чернівці] Помилка під час запуску p.chromium.launch (стандартний запуск).",
                                  exc_info=True)
                     return None
 
