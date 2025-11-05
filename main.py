@@ -364,23 +364,30 @@ class ScheduleParser:
 
     @staticmethod
     async def _parse_kyiv_dtek(city_data: dict, address: str) -> Optional[List[Dict]]:
-        """ВИПРАВЛЕНО: Парсер для Києва (ДТЕК) з посиленими заголовками"""
+        """КРИТИЧНО ОНОВЛЕНО: Парсер для Києва (ДТЕК) з посиленими заголовками"""
         api_url = city_data['search_url_api']
 
+        # Використовуємо більш повний набір заголовків для імітації браузера
         headers = {
             'Content-Type': 'application/json',
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
             'X-Requested-With': 'XMLHttpRequest',
-            'Referer': city_data['schedule_url']  # Додано реферер
+            'Accept': 'application/json, text/javascript, */*; q=0.01',  # Додано Accept
+            'Referer': city_data['schedule_url'],
+            'Accept-Language': 'uk-UA,uk;q=0.9',
+            'Sec-Fetch-Mode': 'cors'
         }
 
         # 1. Отримання ID адреси
         try:
+            # Очищуємо адресу від зайвих пробілів та потенційних символів Markdown
+            clean_address = re.sub(r'[*\-_~]', '', address).strip()
+
             async with aiohttp.ClientSession() as session:
 
                 response = await session.post(
                     api_url,
-                    json={"search": address},
+                    json={"search": clean_address},  # Використовуємо очищену адресу
                     headers=headers
                 )
                 data = await response.json()
@@ -397,6 +404,15 @@ class ScheduleParser:
                 street_id = result['street_id']
                 house_id = result['house_id']
 
+                # Додаємо додаткову перевірку
+                if not street_id or not house_id:
+                    return [{
+                        'time': 'Помилка',
+                        'status': 'error',
+                        'message': 'API знайшло, але не змогло визначити ID вулиці/будинку. Спробуйте інший формат.'
+                    }]
+
+
         except Exception as e:
             logger.error(f"[Київ] Помилка пошуку адреси: {e}", exc_info=True)
             return [{
@@ -405,7 +421,7 @@ class ScheduleParser:
                 'message': 'Помилка з\'єднання з API ДТЕК.'
             }]
 
-        # 2. Отримання графіку
+        # 2. Отримання графіку (використовуючи отримані ID)
         try:
             async with aiohttp.ClientSession() as session:
                 response = await session.post(
