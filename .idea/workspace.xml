@@ -4,10 +4,7 @@
     <option name="autoReloadType" value="SELECTIVE" />
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="daf64348-2031-4f25-ba8c-f28339a70498" name="Changes" comment="update search street kyiv">
-      <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/main.py" beforeDir="false" afterPath="$PROJECT_DIR$/main.py" afterDir="false" />
-    </list>
+    <list default="true" id="daf64348-2031-4f25-ba8c-f28339a70498" name="Changes" comment="test kyiv" />
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
     <option name="HIGHLIGHT_NON_ACTIVE_CHANGELIST" value="false" />
@@ -66,7 +63,7 @@
       <option name="presentableId" value="Default" />
       <updated>1762255700994</updated>
       <workItem from="1762255702409" duration="9017000" />
-      <workItem from="1762327241060" duration="10388000" />
+      <workItem from="1762327241060" duration="11009000" />
     </task>
     <task id="LOCAL-00001" summary="create new telegram bot for check light in home">
       <option name="closed" value="true" />
@@ -188,7 +185,15 @@
       <option name="project" value="LOCAL" />
       <updated>1762338766146</updated>
     </task>
-    <option name="localTasksCounter" value="16" />
+    <task id="LOCAL-00016" summary="test kyiv">
+      <option name="closed" value="true" />
+      <created>1762339908139</created>
+      <option name="number" value="00016" />
+      <option name="presentableId" value="LOCAL-00016" />
+      <option name="project" value="LOCAL" />
+      <updated>1762339908139</updated>
+    </task>
+    <option name="localTasksCounter" value="17" />
     <servers />
   </component>
   <component name="TypeScriptGeneratedFilesManager">
@@ -220,6 +225,7 @@
     <MESSAGE value="fix last push" />
     <MESSAGE value="fix last updata" />
     <MESSAGE value="update search street kyiv" />
-    <option name="LAST_COMMIT_MESSAGE" value="update search street kyiv" />
+    <MESSAGE value="test kyiv" />
+    <option name="LAST_COMMIT_MESSAGE" value="test kyiv" />
   </component>
 </project>
