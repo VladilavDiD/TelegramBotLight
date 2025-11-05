@@ -4,9 +4,8 @@
     <option name="autoReloadType" value="SELECTIVE" />
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="daf64348-2031-4f25-ba8c-f28339a70498" name="Changes" comment="">
+    <list default="true" id="daf64348-2031-4f25-ba8c-f28339a70498" name="Changes" comment="debug and update main.py, fix bag, comeback citi, check new parsing">
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/main.py" beforeDir="false" afterPath="$PROJECT_DIR$/main.py" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -66,7 +65,7 @@
       <option name="presentableId" value="Default" />
       <updated>1762255700994</updated>
       <workItem from="1762255702409" duration="9017000" />
-      <workItem from="1762327241060" duration="1848000" />
+      <workItem from="1762327241060" duration="3425000" />
     </task>
     <task id="LOCAL-00001" summary="create new telegram bot for check light in home">
       <option name="closed" value="true" />
@@ -100,7 +99,23 @@
       <option name="project" value="LOCAL" />
       <updated>1762264016946</updated>
     </task>
-    <option name="localTasksCounter" value="5" />
+    <task id="LOCAL-00005" summary="update check parsing in Chernivtsi grafick">
+      <option name="closed" value="true" />
+      <created>1762329478372</created>
+      <option name="number" value="00005" />
+      <option name="presentableId" value="LOCAL-00005" />
+      <option name="project" value="LOCAL" />
+      <updated>1762329478372</updated>
+    </task>
+    <task id="LOCAL-00006" summary="debug and update main.py, fix bag, comeback citi, check new parsing">
+      <option name="closed" value="true" />
+      <created>1762329786860</created>
+      <option name="number" value="00006" />
+      <option name="presentableId" value="LOCAL-00006" />
+      <option name="project" value="LOCAL" />
+      <updated>1762329786860</updated>
+    </task>
+    <option name="localTasksCounter" value="7" />
     <servers />
   </component>
   <component name="TypeScriptGeneratedFilesManager">
@@ -122,6 +137,8 @@
     <MESSAGE value="push it final" />
     <MESSAGE value="update some function, add new location Kyiv, Khmel and KP" />
     <MESSAGE value="fix and update" />
-    <option name="LAST_COMMIT_MESSAGE" value="fix and update" />
+    <MESSAGE value="update check parsing in Chernivtsi grafick" />
+    <MESSAGE value="debug and update main.py, fix bag, comeback citi, check new parsing" />
+    <option name="LAST_COMMIT_MESSAGE" value="debug and update main.py, fix bag, comeback citi, check new parsing" />
   </component>
 </project>
