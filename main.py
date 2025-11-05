@@ -317,7 +317,7 @@ class ScheduleParser:
 
                 try:
                     # Йдемо на сторінку
-                    await page.goto(url, wait_until="domcontentloaded", timeout=30000)
+                    await page.goto(url, wait_until="domcontentloaded", timeout=90000)
                 except Exception as e:
                     logger.error(f"[Чернівці] Не вдалося завантажити сторінку: {e}")
                     await browser.close()
@@ -327,7 +327,7 @@ class ScheduleParser:
                     # КЛЮЧОВИЙ КРОК: Чекаємо на появу першої групи,
                     # це індикатор, що JavaScript відпрацював
                     # Cайт використовує id="inf1", "inf2" і т.д.
-                    await page.wait_for_selector("div#inf1", timeout=30000)
+                    await page.wait_for_selector("div#inf1", timeout=90000)
                     logger.info("[Чернівці] Динамічний контент (div#inf1) завантажено.")
                 except PlaywrightTimeoutError:
                     logger.error("[Чернівці] Timeout: Графік не завантажився на сторінці (div#inf1 не знайдено).")
