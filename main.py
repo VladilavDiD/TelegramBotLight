@@ -9,7 +9,10 @@ import json
 import sqlite3
 import urllib.parse
 from urllib.parse import urljoin, quote_plus
+import aiohttp
+from bs4 import BeautifulSoup
 
+from playwright.async_api import async_playwright, TimeoutError as PlaywrightTimeoutError
 from aiogram import Bot, Dispatcher, F, Router
 from aiogram.filters import Command
 from aiogram.fsm.state import State, StatesGroup
@@ -289,138 +292,149 @@ class ScheduleParser:
 
     @staticmethod
     async def _parse_chernivtsi(city_data: dict) -> Optional[Dict[int, List[Dict]]]:
-        """ВИПРАВЛЕНО: Покращений парсер з детальним логуванням"""
+        """
+        ВИПРАВЛЕНО: Використання Playwright для парсингу динамічного сайту Чернівціобленерго,
+        оскільки графіки завантажуються через JavaScript.
+        """
+        url = city_data['schedule_url']
+        logger.info("[Чернівці] Запуск парсингу з Playwright...")
+
         try:
-            url = city_data['schedule_url']
-            headers = {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
-                'Accept-Language': 'uk-UA,uk;q=0.9,en-US;q=0.8,en;q=0.7',
-                'Accept-Encoding': 'gzip, deflate, br',
-                'Connection': 'keep-alive',
-                'Upgrade-Insecure-Requests': '1',
-                'Cache-Control': 'no-cache',
-                'Pragma': 'no-cache'
-            }
+            async with async_playwright() as p:
+                try:
+                    browser = await p.chromium.launch(headless=True)
+                except Exception as e:
+                    logger.error(f"[Чернівці] Не вдалося запустити браузер Playwright. "
+                                 f"Переконайтеся, що виконано 'playwright install'. Помилка: {e}")
+                    return None
 
-            async with aiohttp.ClientSession() as session:
-                async with session.get(url, headers=headers, timeout=30) as response:
-                    if response.status != 200:
-                        logger.error(f"[Чернівці] HTTP {response.status}")
-                        return None
+                page = await browser.new_page()
 
-                    html = await response.text()
+                # Встановлюємо User-Agent, схожий на реальний
+                await page.set_extra_http_headers({
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+                })
 
-                    # Додаткове логування для діагностики
-                    logger.info(f"[Чернівці] HTML отримано, довжина: {len(html)} символів")
+                try:
+                    # Йдемо на сторінку
+                    await page.goto(url, wait_until="domcontentloaded", timeout=30000)
+                except Exception as e:
+                    logger.error(f"[Чернівці] Не вдалося завантажити сторінку: {e}")
+                    await browser.close()
+                    return None
 
-                    soup = BeautifulSoup(html, 'html.parser')
+                try:
+                    # КЛЮЧОВИЙ КРОК: Чекаємо на появу першої групи,
+                    # це індикатор, що JavaScript відпрацював
+                    # Cайт використовує id="inf1", "inf2" і т.д.
+                    await page.wait_for_selector("div#inf1", timeout=30000)
+                    logger.info("[Чернівці] Динамічний контент (div#inf1) завантажено.")
+                except PlaywrightTimeoutError:
+                    logger.error("[Чернівці] Timeout: Графік не завантажився на сторінці (div#inf1 не знайдено).")
+                    # Зберігаємо скріншот для відладки, якщо папка /tmp існує
+                    try:
+                        await page.screenshot(path='/tmp/chernivtsi_timeout_debug.png')
+                        logger.info("[Чернівці] Скріншот збережено в /tmp/chernivtsi_timeout_debug.png")
+                    except Exception:
+                        pass
+                    await browser.close()
+                    return None
 
-                    # ВАРІАНТ 1: Пошук через div з id="gsv" (оригінальна логіка)
-                    time_headers = []
-                    time_container = soup.find('div', {'id': 'gsv'})
+                # Отримуємо HTML сторінки ПІСЛЯ виконання JavaScript
+                html = await page.content()
+                await browser.close()
 
-                    if time_container:
-                        logger.info("[Чернівці] Знайдено контейнер з id='gsv'")
-                        # Шукаємо всі часові мітки
-                        time_elements = time_container.find_all('b')
-                        logger.info(f"[Чернівці] Знайдено {len(time_elements)} елементів <b>")
+            # Тепер передаємо цей HTML в BeautifulSoup, як у вашому оригінальному коді
+            logger.info(f"[Чернівці] HTML отримано (з Playwright), довжина: {len(html)} символів")
+            soup = BeautifulSoup(html, 'html.parser')
 
-                        for time_block in time_elements:
-                            text = time_block.get_text(strip=True)
-                            hour_match = re.search(r'(\d{1,2}):\d{2}', text)
-                            if hour_match:
-                                hour = int(hour_match.group(1))
-                                time_headers.append(f"{hour:02d}:00-{hour:02d}:30")
-                                time_headers.append(f"{hour:02d}:30-{(hour + 1) % 24:02d}:00")
+            # --- Подальша логіка парсингу (взята з вашого коду) ---
+
+            time_headers = []
+            # Cайт використовує id="gsv" для блоку з часом
+            time_container = soup.find('div', {'id': 'gsv'})
+
+            if time_container:
+                logger.info("[Чернівці] Знайдено контейнер з id='gsv'")
+                # Час в тегах <b> всередині gsv
+                time_elements = time_container.find_all('b')
+                logger.info(f"[Чернівці] Знайдено {len(time_elements)} елементів <b> з часом")
+
+                for time_block in time_elements:
+                    text = time_block.get_text(strip=True)
+                    hour_match = re.search(r'(\d{1,2}):\d{2}', text)
+                    if hour_match:
+                        hour = int(hour_match.group(1))
+                        # Формуємо 30-хвилинні інтервали
+                        time_headers.append(f"{hour:02d}:00-{hour:02d}:30")
+                        time_headers.append(f"{hour:02d}:30-{(hour + 1) % 24:02d}:00")
+
+            if not time_headers:
+                logger.error("[Чернівці] Часові інтервали (id='gsv') не знайдено (після Playwright).")
+                try:
+                    with open('/tmp/chernivtsi_playwright_debug.html', 'w', encoding='utf-8') as f:
+                        f.write(html)
+                    logger.info("[Чернівці] HTML збережено в /tmp/chernivtsi_playwright_debug.html")
+                except Exception:
+                    pass
+                return None
+
+            logger.info(f"[Чернівці] Знайдено {len(time_headers)} часових інтервалів")
+
+            # Парсимо графіки груп (ваша оригінальна логіка)
+            schedule_data = {}
+            for group_num in range(1, city_data['groups'] + 1):
+                group_div = soup.find('div', {'id': f'inf{group_num}'})
+
+                if not group_div:
+                    logger.warning(f"[Чернівці] Група {group_num} (div#inf{group_num}) не знайдена")
+                    continue
+
+                logger.info(f"[Чернівці] Обробка групи {group_num}")
+                schedule_data[group_num] = []
+
+                # Ваша оригінальна логіка пошуку тегів статусу (u - on, o - off, s - maybe)
+                cells = []
+                for tag in group_div.descendants:
+                    if hasattr(tag, 'name') and tag.name in ['u', 'o', 's']:
+                        cells.append(tag)
+
+                if not cells:
+                    cells = group_div.find_all(['u', 'o', 's'])
+
+                logger.info(f"[Чернівці] Група {group_num}: знайдено {len(cells)} статусних комірок")
+
+                for idx, cell in enumerate(cells):
+                    if idx >= len(time_headers):
+                        break  # Уникнення помилки, якщо статусів більше, ніж заголовків часу
+
+                    tag_name = cell.name
+                    if tag_name == 'u':
+                        status = 'on'
+                    elif tag_name == 'o':
+                        status = 'off'
+                    elif tag_name == 's':
+                        status = 'maybe'
                     else:
-                        logger.warning("[Чернівці] Контейнер з id='gsv' НЕ знайдено")
+                        status = 'on'  # Default
 
-                        # ВАРІАНТ 2: Альтернативний пошук часових міток
-                        all_bold = soup.find_all('b', string=re.compile(r'\d{1,2}:\d{2}'))
-                        logger.info(f"[Чернівці] Альтернативний пошук: знайдено {len(all_bold)} часових міток")
+                    schedule_data[group_num].append({
+                        'time': time_headers[idx],
+                        'status': status
+                    })
 
-                        for time_block in all_bold:
-                            text = time_block.get_text(strip=True)
-                            hour_match = re.search(r'(\d{1,2}):\d{2}', text)
-                            if hour_match:
-                                hour = int(hour_match.group(1))
-                                time_headers.append(f"{hour:02d}:00-{hour:02d}:30")
-                                time_headers.append(f"{hour:02d}:30-{(hour + 1) % 24:02d}:00")
+            if not schedule_data:
+                logger.error("[Чернівці] Жодної групи не оброблено (після Playwright).")
+                return None
 
-                    if not time_headers:
-                        logger.error("[Чернівці] Часові інтервали не знайдено")
-                        # Зберігаємо HTML для аналізу
-                        with open('/tmp/chernivtsi_debug.html', 'w', encoding='utf-8') as f:
-                            f.write(html)
-                        logger.info("[Чернівці] HTML збережено в /tmp/chernivtsi_debug.html")
-                        return None
-
-                    logger.info(f"[Чернівці] Знайдено {len(time_headers)} часових інтервалів")
-
-                    # Парсимо графіки груп
-                    schedule_data = {}
-
-                    for group_num in range(1, city_data['groups'] + 1):
-                        # Спробуємо різні варіанти пошуку
-                        group_div = (
-                                soup.find('div', {'id': f'inf{group_num}'}) or
-                                soup.find('div', {'id': f'group{group_num}'}) or
-                                soup.find('div', {'class': re.compile(f'group.*{group_num}', re.I)})
-                        )
-
-                        if not group_div:
-                            logger.warning(f"[Чернівці] Група {group_num} не знайдена")
-                            continue
-
-                        logger.info(f"[Чернівці] Обробка групи {group_num}")
-                        schedule_data[group_num] = []
-
-                        # Шукаємо статусні теги (u, o, s)
-                        cells = []
-
-                        # ВАРІАНТ 1: Через descendants
-                        for tag in group_div.descendants:
-                            if hasattr(tag, 'name') and tag.name in ['u', 'o', 's']:
-                                cells.append(tag)
-
-                        # ВАРІАНТ 2: Якщо не знайшли через descendants, шукаємо прямо
-                        if not cells:
-                            cells = group_div.find_all(['u', 'o', 's'])
-
-                        logger.info(f"[Чернівці] Група {group_num}: знайдено {len(cells)} статусних комірок")
-
-                        for idx, cell in enumerate(cells):
-                            if idx >= len(time_headers):
-                                break
-
-                            tag_name = cell.name
-
-                            # Визначаємо статус
-                            if tag_name == 'u':
-                                status = 'on'
-                            elif tag_name == 'o':
-                                status = 'off'
-                            elif tag_name == 's':
-                                status = 'maybe'
-                            else:
-                                status = 'on'
-
-                            schedule_data[group_num].append({
-                                'time': time_headers[idx],
-                                'status': status
-                            })
-
-                    if not schedule_data:
-                        logger.error("[Чернівці] Жодної групи не оброблено")
-                        return None
-
-                    logger.info(f"[Чернівці] ✅ Успішно оброблено {len(schedule_data)} груп")
-                    return schedule_data
+            logger.info(f"[Чернівці] ✅ Успішно оброблено {len(schedule_data)} груп з Playwright")
+            return schedule_data
 
         except Exception as e:
-            logger.error(f"[Чернівці] Критична помилка: {e}", exc_info=True)
+            logger.error(f"[Чернівці] Критична помилка в _parse_chernivtsi (Playwright): {e}", exc_info=True)
             return None
+
+
     @staticmethod
     async def _parse_kyiv_dtek(city_data: dict, address: str) -> Optional[List[Dict]]:
         """ВИПРАВЛЕНО: Парсер для Києва (ДТЕК) з посиленими заголовками"""
