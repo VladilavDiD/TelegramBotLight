@@ -17,6 +17,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
+from aiogram.client.default import DefaultBotProperties
 import aiohttp
 from bs4 import BeautifulSoup
 
@@ -1187,7 +1188,11 @@ async def main():
 
     init_db()
 
-    bot = Bot(token=BOT_TOKEN, parse_mode='Markdown')  # Встановлюємо Markdown за замовчуванням
+    bot = Bot(
+        token=BOT_TOKEN,
+        # Використовуємо новий спосіб для налаштувань за замовчуванням
+        default=DefaultBotProperties(parse_mode='Markdown')
+    )  # Встановлюємо Markdown за замовчуванням
     dp = Dispatcher(storage=MemoryStorage())
     dp.include_router(router)
 
