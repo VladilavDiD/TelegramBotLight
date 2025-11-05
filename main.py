@@ -33,7 +33,6 @@ logger = logging.getLogger(__name__)
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 if not BOT_TOKEN:
     logger.warning("BOT_TOKEN не встановлено у змінних середовища. Використовується заглушка.")
-    # Припускаємо, що тут ви підставили свій справжній токен для роботи
     BOT_TOKEN = "8264057355:AAGgZMq5_2lNJRs5JV8KudlPyiQv6iKj_Sk"
 
 DATABASE_PATH = "bot_database.db"
@@ -49,7 +48,6 @@ CITIES: Dict[str, Dict[str, Any]] = {
     "kyiv": {
         "name": "Київ (ДТЕК)",
         "schedule_url": "https://www.dtek-kem.com.ua/ua/shutdowns",
-        # API для пошуку адреси та отримання графіку
         "search_url_api": "https://api-kem-dtek.com.ua/api/v1/user_schedules_info",
         "parser_type": "kyiv_dtek_address",
         "note": "Потрібна адреса для перевірки."
@@ -151,20 +149,23 @@ def init_db():
 class UserManager:
     @staticmethod
     def save_user(user_id: int, username: str, city: str = "chernivtsi", group_number: Optional[int] = None):
+        """ОНОВЛЕНО: Примусово зберігає або оновлює користувача, якщо він не знайдений."""
         with get_db() as conn:
             conn.execute("""
                 INSERT INTO users (user_id, username, city, group_number)
                 VALUES (?, ?, ?, ?)
                 ON CONFLICT(user_id) DO UPDATE SET
-                    username = excluded.username
+                    username = excluded.username,
+                    city = excluded.city 
             """, (user_id, username, city, group_number))
             conn.commit()
 
     @staticmethod
     def update_city(user_id: int, city: str):
         with get_db() as conn:
+            # ОНОВЛЕНО: Якщо місто змінюється, скидаємо групу та адресу в основній таблиці
             conn.execute(
-                "UPDATE users SET city = ? WHERE user_id = ?",
+                "UPDATE users SET city = ?, group_number = NULL, address = NULL WHERE user_id = ?",
                 (city, user_id)
             )
             conn.commit()
@@ -172,6 +173,7 @@ class UserManager:
     @staticmethod
     def update_group(user_id: int, group_number: int):
         with get_db() as conn:
+            # ОНОВЛЕНО: Оновлюємо групу в основній таблиці
             conn.execute(
                 "UPDATE users SET group_number = ? WHERE user_id = ?",
                 (group_number, user_id)
@@ -179,6 +181,7 @@ class UserManager:
 
             user = UserManager.get_user(user_id)
             if user:
+                # ОНОВЛЕНО: Оновлюємо або створюємо запис у user_cities
                 conn.execute("""
                     INSERT INTO user_cities (user_id, city, group_number)
                     VALUES (?, ?, ?)
@@ -193,7 +196,7 @@ class UserManager:
     def update_address(user_id: int, address: str, city: str):
         with get_db() as conn:
             conn.execute(
-                "UPDATE users SET address = ?, city = ? WHERE user_id = ?",
+                "UPDATE users SET address = ?, city = ?, group_number = NULL WHERE user_id = ?",
                 (address, city, user_id)
             )
             conn.execute("""
@@ -223,7 +226,6 @@ class UserManager:
     @staticmethod
     def get_users_by_city_and_group(city: str, group_number: int) -> List[Dict]:
         with get_db() as conn:
-            # Для міст з групою
             rows = conn.execute(
                 "SELECT * FROM users WHERE city = ? AND group_number = ? AND notifications_enabled = 1",
                 (city, group_number)
@@ -233,7 +235,6 @@ class UserManager:
     @staticmethod
     def get_users_by_city(city: str) -> List[Dict]:
         with get_db() as conn:
-            # Для міст з адресою (Київ) або зображенням (Хмельницький/Кам'янець)
             rows = conn.execute(
                 "SELECT * FROM users WHERE city = ? AND notifications_enabled = 1 AND (address IS NOT NULL OR group_number IS NOT NULL)",
                 (city,)
@@ -275,12 +276,9 @@ class ScheduleParser:
             if parser_type == 'chernivtsi_custom':
                 return await ScheduleParser._parse_chernivtsi(city_data)
             elif parser_type == 'kyiv_dtek_address' and address:
-                # Київ: парсинг за адресою
                 schedule = await ScheduleParser._parse_kyiv_dtek(city_data, address)
-                # Повертаємо у вигляді {0: schedule_list}
                 return {0: schedule} if schedule else None
             elif parser_type == 'image_based':
-                # Хмельницький/Кам'янець-Подільський: шукаємо зображення
                 return await ScheduleParser._parse_image_based(city_data, city)
             else:
                 return await ScheduleParser._parse_generic(city_data, city)
@@ -291,14 +289,15 @@ class ScheduleParser:
 
     @staticmethod
     async def _parse_chernivtsi(city_data: dict) -> Optional[Dict[int, List[Dict]]]:
-        """ОНОВЛЕНИЙ: Спеціальний парсер для Чернівців з custom HTML структурою"""
+        """ОНОВЛЕНО: Додано посилені заголовки для більшої надійності"""
         try:
             url = city_data['schedule_url']
             headers = {
                 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
                 'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
                 'Accept-Language': 'uk-UA,uk;q=0.9',
-                'Referer': url
+                'Referer': url,
+                'Cache-Control': 'no-cache'  # Запобігаємо кешуванню
             }
 
             async with aiohttp.ClientSession() as session:
@@ -318,7 +317,6 @@ class ScheduleParser:
                             hour_match = re.search(r'(\d{1,2}):\d{2}', time_block.get_text(strip=True))
                             if hour_match:
                                 hour = int(hour_match.group(1))
-                                # Кожен блок відповідає 2 півгодинним інтервалам
                                 time_headers.append(f"{hour:02d}:00-{hour:02d}:30")
                                 time_headers.append(f"{hour:02d}:30-{hour + 1:02d}:00" if hour < 23 else "23:30-00:00")
 
@@ -344,11 +342,11 @@ class ScheduleParser:
 
                             tag_name = cell.name
 
-                            if tag_name == 'u':  # <u> = зелений (світло є)
+                            if tag_name == 'u':
                                 status = 'on'
-                            elif tag_name == 'o':  # <o> = червоний (відключення)
+                            elif tag_name == 'o':
                                 status = 'off'
-                            elif tag_name == 's':  # <s> = можливо
+                            elif tag_name == 's':
                                 status = 'maybe'
                             else:
                                 status = 'on'
@@ -366,17 +364,17 @@ class ScheduleParser:
 
     @staticmethod
     async def _parse_kyiv_dtek(city_data: dict, address: str) -> Optional[List[Dict]]:
-        """ВИПРАВЛЕНО: Парсер для Києва (ДТЕК) через API за адресою"""
+        """ВИПРАВЛЕНО: Парсер для Києва (ДТЕК) з посиленими заголовками"""
         api_url = city_data['search_url_api']
 
-        # Посилені заголовки
         headers = {
             'Content-Type': 'application/json',
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-            'X-Requested-With': 'XMLHttpRequest'
+            'X-Requested-With': 'XMLHttpRequest',
+            'Referer': city_data['schedule_url']  # Додано реферер
         }
 
-        # 1. Отримання ID адреси (Виправлення: посилені заголовки)
+        # 1. Отримання ID адреси
         try:
             async with aiohttp.ClientSession() as session:
 
@@ -427,7 +425,6 @@ class ScheduleParser:
                 for item in raw_schedule:
                     schedule_list.append({
                         'time': item['time'],
-                        # Перетворюємо статус у відповідний формат
                         'status': item['status'].lower().replace('possible', 'maybe')
                     })
 
@@ -455,6 +452,7 @@ class ScheduleParser:
             url = city_data['schedule_url']
             headers = {
                 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+                'Cache-Control': 'no-cache'
             }
 
             async with aiohttp.ClientSession() as session:
@@ -525,16 +523,13 @@ class ScheduleParser:
             ).fetchone()
             return row['image_url'] if row else None
 
-    # Решта статичних методів
+    # ... (Решта статичних методів)
     @staticmethod
     def _parse_generic(city_data: dict, city: str) -> Optional[Dict[int, List[Dict]]]:
-        # ... (ваш код)
         return None
 
-    # ... (інші методи)
     @staticmethod
     def save_schedule(city: str, group_number: int, date: str, schedule_data: str):
-        """Збереження графіку"""
         with get_db() as conn:
             conn.execute("""
                 INSERT INTO schedules (city, group_number, date, schedule_data)
@@ -547,7 +542,6 @@ class ScheduleParser:
 
     @staticmethod
     def get_schedule(city: str, group_number: int, date: str) -> Optional[str]:
-        """Отримання графіку"""
         with get_db() as conn:
             row = conn.execute(
                 "SELECT schedule_data FROM schedules WHERE city = ? AND group_number = ? AND date = ?",
@@ -562,11 +556,9 @@ def format_schedule(schedule: List[Dict], city_data: dict = None) -> str:
     if not schedule:
         return "✅ Наразі планових відключень немає!"
 
-    # Перевірка на спеціальні повідомлення
     if schedule and schedule[0].get('status') in ['info', 'error']:
         msg = schedule[0].get('message', '')
         if 'image_url' in schedule[0]:
-            # ВИПРАВЛЕНО: Використовуємо Markdown для посилання
             return f"📷 {msg}\n\n[Переглянути зображення]({schedule[0]['image_url']})"
 
         emoji = "❌" if schedule[0].get('status') == 'error' else "ℹ️"
@@ -591,16 +583,14 @@ def format_schedule(schedule: List[Dict], city_data: dict = None) -> str:
     return text
 
 
-# ... (Клавіатури та Роутери без змін)
+# Клавіатури (без змін)
 def get_main_keyboard(user_city: str = "chernivtsi") -> InlineKeyboardMarkup:
     city_name = CITIES.get(user_city, {}).get('name', 'Чернівці')
     city_data = CITIES.get(user_city, {})
-
     if city_data.get('parser_type') == 'kyiv_dtek_address':
         group_or_address_button = InlineKeyboardButton(text="🏠 Змінити адресу", callback_data="change_address")
     else:
         group_or_address_button = InlineKeyboardButton(text="⚙️ Змінити групу", callback_data="change_group")
-
     keyboard = [
         [InlineKeyboardButton(text="📊 Мій графік", callback_data="my_schedule")],
         [InlineKeyboardButton(text="🔄 Оновити графік", callback_data="refresh_schedule")],
@@ -636,15 +626,13 @@ def get_groups_keyboard() -> InlineKeyboardMarkup:
                 ))
         if row:
             keyboard.append(row)
-
     keyboard.append([InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_menu")])
     return InlineKeyboardMarkup(inline_keyboard=keyboard)
 
 
+# Бот
 router = Router()
 
-
-# ... (Всі роутери команд та callback-ів залишаються без змін)
 
 @router.message(Command("start"))
 async def cmd_start(message: Message, state: FSMContext):
@@ -669,8 +657,27 @@ async def cmd_start(message: Message, state: FSMContext):
     await message.answer(welcome_text, reply_markup=get_main_keyboard(city))
 
 
+# ОНОВЛЕНО: Додана команда /debug
+@router.message(Command("debug"))
+async def cmd_debug(message: Message):
+    """Команда для відладки"""
+    user = UserManager.get_user(message.from_user.id)
+    if not user:
+        await message.answer("❌ Користувача не знайдено в базі даних")
+        return
+    debug_text = "🔍 Ваші дані в системі:\n\n"
+    debug_text += f"User ID: {user['user_id']}\n"
+    debug_text += f"Username: {user.get('username', 'N/A')}\n"
+    debug_text += f"Місто: {user.get('city', 'N/A')}\n"
+    debug_text += f"Група: {user.get('group_number', 'N/A')}\n"
+    debug_text += f"Адреса: {user.get('address', 'N/A')}\n"
+    debug_text += f"Сповіщення: {'✅' if user.get('notifications_enabled') else '❌'}\n"
+    await message.answer(debug_text)
+
+
 @router.message(Command("update"))
 async def cmd_update(message: Message):
+    """Команда для ручного оновлення графіків"""
     await message.answer("⏳ Запускаю повне оновлення графіків для всіх міст, що підтримують автопарсинг...")
     bot = message.bot
     await update_schedules(bot)
@@ -679,6 +686,7 @@ async def cmd_update(message: Message):
 
 @router.message(Command("test"))
 async def cmd_test(message: Message):
+    """Тестове оновлення для конкретного міста"""
     user = UserManager.get_user(message.from_user.id)
     city = user.get('city', 'chernivtsi') if user else 'chernivtsi'
     city_data = CITIES[city]
@@ -709,14 +717,22 @@ async def show_schedule(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
     await state.clear()
     user = UserManager.get_user(callback.from_user.id)
+
+    # Виправлення проблеми "Спробуйте /start"
     if not user:
-        await callback.message.answer("❌ Спробуйте /start")
+        UserManager.save_user(callback.from_user.id, callback.from_user.username or "Unknown")
+        user = UserManager.get_user(callback.from_user.id)
+
+    if not user:
+        await callback.message.answer("❌ Сталася помилка. Спробуйте /start")
         return
+
     city = user.get('city', 'chernivtsi')
     city_data = CITIES.get(city, {})
     city_name = city_data.get('name', 'Чернівці')
     parser_type = city_data.get('parser_type')
     is_address_city = parser_type == 'kyiv_dtek_address'
+
     if is_address_city and not user.get('address'):
         await callback.message.answer(f"❌ Для {city_name} потрібно вказати **адресу**.",
                                       reply_markup=get_main_keyboard(city))
@@ -726,10 +742,12 @@ async def show_schedule(callback: CallbackQuery, state: FSMContext):
         await callback.message.answer(f"❌ Для {city_name} потрібно обрати **групу**.",
                                       reply_markup=get_main_keyboard(city))
         return
+
     group_num = user.get('group_number', 0)
     address = user.get('address')
     today = datetime.now().strftime("%Y-%m-%d")
     schedule_data = ScheduleParser.get_schedule(city, group_num, today)
+
     if schedule_data:
         schedule = json.loads(schedule_data)
         text = format_schedule(schedule, city_data)
@@ -742,10 +760,13 @@ async def show_schedule(callback: CallbackQuery, state: FSMContext):
                 text += f"\n\n🕐 Оновлено: {updated['updated_at'].split('.')[0]}"
         await callback.message.answer(text, reply_markup=get_main_keyboard(city), disable_web_page_preview=False)
         return
+
     await callback.message.answer("⏳ Завантажую актуальний графік...")
+
     try:
         schedules = await ScheduleParser.fetch_schedule(city, address=address)
         target_key = group_num if not is_address_city else 0
+
         if schedules and target_key in schedules:
             schedule = schedules[target_key]
             schedule_json = json.dumps(schedule, ensure_ascii=False)
@@ -756,14 +777,17 @@ async def show_schedule(callback: CallbackQuery, state: FSMContext):
             text += f"\n\n🕐 Оновлено щойно"
             await callback.message.answer(text, reply_markup=get_main_keyboard(city), disable_web_page_preview=False)
             return
+
         elif schedules and 0 in schedules and schedules[0][0].get('status') in ['info', 'error']:
             schedule = schedules[0]
             text = format_schedule(schedule, city_data)
             text = f"🏙 {city_name}\n\n" + text
             await callback.message.answer(text, reply_markup=get_main_keyboard(city), disable_web_page_preview=False)
             return
+
     except Exception as e:
         logger.error(f"Error fetching schedule: {e}", exc_info=True)
+
     await callback.message.answer(
         f"❌ Не вдалося отримати графік для {city_name}.\n\nСпробуйте пізніше або перевірте на сайті.",
         reply_markup=get_main_keyboard(city))
@@ -784,11 +808,16 @@ async def select_city(callback: CallbackQuery, state: FSMContext):
     city_id = callback.data.split("_")[1]
     city_data = CITIES.get(city_id, {})
     city_name = city_data.get('name', 'Невідоме місто')
+
+    # ОНОВЛЕНО: Оновлюємо місто в першу чергу, це фіксує проблему з Кам'янцем-Подільським
     UserManager.update_city(callback.from_user.id, city_id)
+    user = UserManager.get_user(callback.from_user.id)
     user_cities = UserManager.get_user_cities(callback.from_user.id)
+
     message_text = f"✅ Місто {city_name} встановлено!\n\n"
     if city_data.get('note'):
         message_text += f"ℹ️ {city_data['note']}\n\n"
+
     if city_data.get('parser_type') == 'kyiv_dtek_address':
         existing_address = next((uc['address'] for uc in user_cities if uc['city'] == city_id), None)
         if existing_address:
@@ -802,6 +831,7 @@ async def select_city(callback: CallbackQuery, state: FSMContext):
     else:
         existing_group = next((uc['group_number'] for uc in user_cities if uc['city'] == city_id), None)
         if existing_group:
+            # Оновлюємо групу з збереженого міста
             UserManager.update_group(callback.from_user.id, existing_group)
             message_text += f"⚡️ Ваша збережена група: {existing_group}"
             await callback.message.answer(message_text, reply_markup=get_main_keyboard(city_id))
@@ -823,7 +853,7 @@ async def select_group(callback: CallbackQuery, state: FSMContext):
     await state.clear()
     group_num = int(callback.data.split("_")[1])
     user = UserManager.get_user(callback.from_user.id)
-    city = user.get('city', 'chernivtsi') if user else 'chernivtsi'
+    city = user.get('city', 'chernivtsi') if user else 'chernivtsi'  # Тут вже має бути коректне місто після select_city
     city_name = CITIES.get(city, {}).get('name', 'Чернівці')
     UserManager.update_group(callback.from_user.id, group_num)
     await callback.message.answer(
@@ -854,11 +884,21 @@ async def process_address(message: Message, state: FSMContext):
     city = user.get('city', 'kyiv') if user else 'kyiv'
     city_name = CITIES.get(city, {}).get('name', 'Київ')
     await message.answer(f"⏳ Перевіряю адресу **{address}** на сайті {city_name}...")
-    schedule = await ScheduleParser._parse_kyiv_dtek(CITIES[city], address)
-    if schedule and schedule[0].get('status') in ['error', 'info']:
+
+    # Використовуємо захищений try-except, щоб уникнути збоїв
+    try:
+        schedule = await ScheduleParser._parse_kyiv_dtek(CITIES[city], address)
+    except Exception as e:
+        logger.error(f"Критична помилка при перевірці адреси: {e}", exc_info=True)
+        schedule = None
+
+    if not schedule or schedule[0].get('status') in ['error', 'info']:
         await message.answer(
-            f"❌ Не вдалося знайти графік для цієї адреси.\n\nБудь ласка, перевірте правильність вводу (наприклад: *проспект Перемоги, 100*)")
+            f"❌ Не вдалося знайти графік для цієї адреси.\n\n"
+            f"Будь ласка, перевірте правильність вводу. Спробуйте формат: *вулиця, номер будинку* (наприклад: *проспект Перемоги, 100*)"
+        )
         return
+
     UserManager.update_address(message.from_user.id, address, city)
     await state.clear()
     await message.answer(
@@ -926,7 +966,6 @@ async def update_schedules(bot: Bot):
         try:
             parser_type = city_data.get('parser_type', 'default')
 
-            # Якщо це парсер зображення, просто отримуємо його URL і оновлюємо image_schedules
             if parser_type == 'image_based':
                 await ScheduleParser.fetch_schedule(city_id)
                 logger.info(f"[{city_id}] URL зображення оновлено.")
