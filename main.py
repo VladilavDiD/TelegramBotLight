@@ -35,36 +35,29 @@ CITIES = {
         "name": "Чернівці",
         "schedule_url": "https://oblenergo.cv.ua/shutdowns/",
         "search_url": "https://oblenergo.cv.ua/shutdowns-search/",
-        "parser_type": "chernivtsi_custom"
+        "parser_type": "chernivtsi_html",
+        "groups_count": 12
     },
     "kyiv": {
         "name": "Київ",
         "schedule_url": "https://www.dtek-kem.com.ua/ua/shutdowns",
         "search_url": "https://www.dtek-kem.com.ua/ua/shutdowns",
-        "parser_type": "kyiv_address_based",
-        "note": "Потрібна адреса для перевірки"
+        "parser_type": "address_based",
+        "note": "Потрібна адреса"
     },
     "khmelnytskyi": {
         "name": "Хмельницький",
         "schedule_url": "https://hoe.com.ua/page/pogodinni-vidkljuchennja",
-        "search_url": "https://hoe.com.ua/page/pogodinni-vidkljuchennja",
         "parser_type": "image_based",
         "note": "Графік у форматі зображення"
     },
     "kamyanets": {
         "name": "Кам'янець-Подільський",
         "schedule_url": "https://hoe.com.ua/page/pogodinni-vidkljuchennja",
-        "search_url": "https://hoe.com.ua/page/pogodinni-vidkljuchennja",
         "parser_type": "image_based",
         "note": "Графік у форматі зображення"
     }
 }
-
-
-# FSM стани
-class UserStates(StatesGroup):
-    waiting_for_group = State()
-    waiting_for_address = State()
 
 
 # База даних
@@ -79,8 +72,9 @@ def get_db():
 
 
 def init_db():
-    """Ініціалізація бази даних"""
+    """Ініціалізація бази даних з оптимізованою структурою"""
     with get_db() as conn:
+        # Таблиця користувачів
         conn.execute("""
             CREATE TABLE IF NOT EXISTS users (
                 user_id INTEGER PRIMARY KEY,
@@ -89,10 +83,12 @@ def init_db():
                 group_number INTEGER,
                 address TEXT,
                 notifications_enabled INTEGER DEFAULT 1,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
 
+        # Таблиця міст користувача (multi-city support)
         conn.execute("""
             CREATE TABLE IF NOT EXISTS user_cities (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -105,6 +101,7 @@ def init_db():
             )
         """)
 
+        # Таблиця графіків - зберігаємо спарсені дані
         conn.execute("""
             CREATE TABLE IF NOT EXISTS schedules (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -112,11 +109,26 @@ def init_db():
                 group_number INTEGER,
                 date TEXT,
                 schedule_data TEXT,
+                raw_html TEXT,
+                parsed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 UNIQUE(city, group_number, date)
             )
         """)
 
+        # Таблиця часових інтервалів (для структурованого зберігання)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS schedule_intervals (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                schedule_id INTEGER,
+                time_start TEXT,
+                time_end TEXT,
+                status TEXT,
+                FOREIGN KEY(schedule_id) REFERENCES schedules(id)
+            )
+        """)
+
+        # Таблиця сповіщень
         conn.execute("""
             CREATE TABLE IF NOT EXISTS notifications_sent (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -128,7 +140,25 @@ def init_db():
                 sent_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
+
+        # Таблиця логів парсингу
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS parse_logs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                city TEXT,
+                status TEXT,
+                message TEXT,
+                groups_parsed INTEGER,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+
+        # Індекси для швидкого пошуку
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_schedules_city_group_date ON schedules(city, group_number, date)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_users_city_group ON users(city, group_number)")
+
         conn.commit()
+        logger.info("✅ База даних ініціалізована")
 
 
 # Користувачі
@@ -140,7 +170,8 @@ class UserManager:
                 INSERT INTO users (user_id, username, city, group_number)
                 VALUES (?, ?, ?, ?)
                 ON CONFLICT(user_id) DO UPDATE SET
-                    username = excluded.username
+                    username = excluded.username,
+                    updated_at = CURRENT_TIMESTAMP
             """, (user_id, username, city, group_number))
             conn.commit()
 
@@ -148,7 +179,7 @@ class UserManager:
     def update_city(user_id: int, city: str):
         with get_db() as conn:
             conn.execute(
-                "UPDATE users SET city = ? WHERE user_id = ?",
+                "UPDATE users SET city = ?, updated_at = CURRENT_TIMESTAMP WHERE user_id = ?",
                 (city, user_id)
             )
             conn.commit()
@@ -157,7 +188,7 @@ class UserManager:
     def update_group(user_id: int, group_number: int):
         with get_db() as conn:
             conn.execute(
-                "UPDATE users SET group_number = ? WHERE user_id = ?",
+                "UPDATE users SET group_number = ?, updated_at = CURRENT_TIMESTAMP WHERE user_id = ?",
                 (group_number, user_id)
             )
 
@@ -173,29 +204,12 @@ class UserManager:
             conn.commit()
 
     @staticmethod
-    def update_address(user_id: int, address: str):
-        with get_db() as conn:
-            conn.execute(
-                "UPDATE users SET address = ? WHERE user_id = ?",
-                (address, user_id)
-            )
-            conn.commit()
-
-    @staticmethod
     def get_user(user_id: int) -> Optional[Dict]:
         with get_db() as conn:
             row = conn.execute(
                 "SELECT * FROM users WHERE user_id = ?", (user_id,)
             ).fetchone()
             return dict(row) if row else None
-
-    @staticmethod
-    def get_user_cities(user_id: int) -> List[Dict]:
-        with get_db() as conn:
-            rows = conn.execute(
-                "SELECT * FROM user_cities WHERE user_id = ?", (user_id,)
-            ).fetchall()
-            return [dict(row) for row in rows]
 
     @staticmethod
     def get_users_by_city_and_group(city: str, group_number: int) -> List[Dict]:
@@ -216,7 +230,7 @@ class UserManager:
             if current:
                 new_state = 0 if current['notifications_enabled'] else 1
                 conn.execute(
-                    "UPDATE users SET notifications_enabled = ? WHERE user_id = ?",
+                    "UPDATE users SET notifications_enabled = ?, updated_at = CURRENT_TIMESTAMP WHERE user_id = ?",
                     (new_state, user_id)
                 )
                 conn.commit()
@@ -224,387 +238,252 @@ class UserManager:
             return False
 
 
-# Покращений парсер графіків
+# Парсер графіків з HTML → БД
 class ScheduleParser:
+
     @staticmethod
-    async def fetch_schedule(city: str = "chernivtsi") -> Optional[Dict[int, List[Dict]]]:
-        """Парсинг графіків з сайту конкретного міста"""
+    async def fetch_and_parse(city: str) -> Dict:
+        """
+        Головна функція парсингу: HTML → Structured Data → БД
+        Повертає статистику парсингу
+        """
+        city_data = CITIES.get(city)
+        if not city_data:
+            return {"success": False, "error": "City not found"}
+
+        parser_type = city_data.get('parser_type')
+
         try:
-            city_data = CITIES.get(city)
-            if not city_data:
-                logger.error(f"Місто {city} не знайдено в конфігурації")
-                return None
-
-            parser_type = city_data.get('parser_type', 'default')
-
-            if parser_type == 'chernivtsi_custom':
-                return await ScheduleParser._parse_chernivtsi(city_data)
-            elif parser_type == 'kyiv_address_based':
-                return await ScheduleParser._parse_kyiv(city_data)
-            elif parser_type == 'image_based':
-                return await ScheduleParser._parse_image_based(city_data, city)
+            if parser_type == "chernivtsi_html":
+                return await ScheduleParser._parse_chernivtsi_full(city, city_data)
+            elif parser_type == "address_based":
+                return {"success": False, "reason": "address_required"}
+            elif parser_type == "image_based":
+                return {"success": False, "reason": "image_format"}
             else:
-                return await ScheduleParser._parse_generic(city_data, city)
+                return {"success": False, "error": "Unknown parser type"}
 
         except Exception as e:
-            logger.error(f"[{city}] Критична помилка парсингу: {e}", exc_info=True)
-            return None
+            logger.error(f"[{city}] Parse error: {e}", exc_info=True)
+            return {"success": False, "error": str(e)}
 
     @staticmethod
-    async def _parse_chernivtsi(city_data: dict) -> Optional[Dict[int, List[Dict]]]:
-        """Спеціальний парсер для Чернівців з custom HTML структурою"""
-        try:
-            url = city_data['schedule_url']
-            headers = {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-                'Accept-Language': 'uk-UA,uk;q=0.9',
-            }
+    async def _parse_chernivtsi_full(city: str, city_data: dict) -> Dict:
+        """
+        Повний парсинг для Чернівців:
+        1. Завантаження HTML
+        2. Парсинг BeautifulSoup
+        3. Витягування даних по групах
+        4. Збереження в БД
+        """
+        url = city_data['schedule_url']
+        logger.info(f"[{city}] 📡 Завантаження з {url}")
 
-            async with aiohttp.ClientSession() as session:
-                async with session.get(url, headers=headers, timeout=30) as response:
-                    if response.status != 200:
-                        logger.error(f"HTTP {response.status} для Чернівців")
-                        return None
+        # 1. Завантаження HTML
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+            'Accept-Language': 'uk-UA,uk;q=0.9',
+        }
 
-                    html = await response.text()
-                    soup = BeautifulSoup(html, 'html.parser')
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, headers=headers, timeout=30) as response:
+                if response.status != 200:
+                    ScheduleParser._log_parse_result(city, "error", f"HTTP {response.status}", 0)
+                    return {"success": False, "error": f"HTTP {response.status}"}
 
-                    # Шукаємо контейнер з графіком
-                    schedule_container = soup.find('div', {'id': 'gsv'})
-                    if not schedule_container:
-                        logger.warning("Контейнер #gsv не знайдено")
-                        return None
+                html = await response.text()
+                logger.info(f"[{city}] 📄 HTML завантажено ({len(html)} символів)")
 
-                    # Отримуємо заголовки часу
-                    time_headers = []
-                    time_container = schedule_container.find('p')
-                    if time_container:
-                        for time_block in time_container.find_all('u', recursive=False):
-                            time_text = time_block.find('b')
-                            if time_text:
-                                hour = time_text.get_text(strip=True).split(':')[0]
-                                time_headers.append(f"{hour}:00-{hour}:30")
-                                time_headers.append(f"{hour}:30-{int(hour) + 1:02d}:00")
-
-                    logger.info(f"[Чернівці] Знайдено часових інтервалів: {len(time_headers)}")
-
-                    # Парсимо графіки груп
-                    schedule_data = {}
-
-                    for group_num in range(1, 13):  # Чернівці мають 12 груп
-                        group_div = soup.find('div', {'id': f'inf{group_num}'})
-                        if not group_div:
-                            continue
-
-                        schedule_data[group_num] = []
-
-                        # Парсимо теги u, o, s для статусів
-                        cells = group_div.find_all(['u', 'o', 's'])
-
-                        for idx, cell in enumerate(cells):
-                            if idx >= len(time_headers):
-                                break
-
-                            tag_name = cell.name
-                            classes = ' '.join(cell.get('class', []))
-
-                            # Визначаємо статус на основі тегу
-                            if tag_name == 'u':  # <u> = зелений (світло є)
-                                status = 'on'
-                            elif tag_name == 'o':  # <o> = червоний (відключення)
-                                status = 'off'
-                            elif tag_name == 's':  # <s> = можливо
-                                status = 'maybe'
-                            else:
-                                status = 'on'
-
-                            schedule_data[group_num].append({
-                                'time': time_headers[idx] if idx < len(time_headers) else f"{idx}:00-{idx}:30",
-                                'status': status
-                            })
-
-                        logger.info(f"[Чернівці] Група {group_num}: {len(schedule_data[group_num])} інтервалів")
-
-                    return schedule_data if schedule_data else None
-
-        except Exception as e:
-            logger.error(f"[Чернівці] Помилка парсингу: {e}", exc_info=True)
-            return None
-
-    @staticmethod
-    async def _parse_kyiv(city_data: dict) -> Optional[Dict[int, List[Dict]]]:
-        """Парсер для Києва (потребує адреси)"""
-        try:
-            logger.info("[Київ] Київ потребує пошуку по адресі, повертаємо порожній графік")
-            # Для Києва повертаємо інфо що потрібна адреса
-            return {
-                0: [{
-                    'time': 'Інформація',
-                    'status': 'info',
-                    'message': 'Для Києва потрібно вказати адресу через пошук на сайті ДТЕК'
-                }]
-            }
-        except Exception as e:
-            logger.error(f"[Київ] Помилка: {e}", exc_info=True)
-            return None
-
-    @staticmethod
-    async def _parse_image_based(city_data: dict, city: str) -> Optional[Dict[int, List[Dict]]]:
-        """Парсер для міст з графіками у вигляді зображень"""
-        try:
-            url = city_data['schedule_url']
-            headers = {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-            }
-
-            async with aiohttp.ClientSession() as session:
-                async with session.get(url, headers=headers, timeout=30) as response:
-                    if response.status != 200:
-                        return None
-
-                    html = await response.text()
-                    soup = BeautifulSoup(html, 'html.parser')
-
-                    # Шукаємо зображення з графіком
-                    images = soup.find_all('img', src=re.compile(r'(grafik|schedule|vidkl)', re.I))
-
-                    if images:
-                        img_url = images[0].get('src')
-                        if not img_url.startswith('http'):
-                            base_url = '/'.join(url.split('/')[:3])
-                            img_url = base_url + img_url
-
-                        logger.info(f"[{city}] Знайдено зображення графіку: {img_url}")
-
-                        return {
-                            0: [{
-                                'time': 'Інформація',
-                                'status': 'info',
-                                'message': f'Графік у форматі зображення',
-                                'image_url': img_url
-                            }]
-                        }
-
-            logger.warning(f"[{city}] Зображення графіку не знайдено")
-            return None
-
-        except Exception as e:
-            logger.error(f"[{city}] Помилка парсингу зображення: {e}", exc_info=True)
-            return None
-
-    @staticmethod
-    async def _parse_generic(city_data: dict, city: str) -> Optional[Dict[int, List[Dict]]]:
-        """Загальний парсер для інших міст"""
-        try:
-            url = city_data['schedule_url']
-            headers = {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-                'Accept-Language': 'uk-UA,uk;q=0.9',
-            }
-
-            async with aiohttp.ClientSession() as session:
-                async with session.get(url, headers=headers, timeout=30) as response:
-                    if response.status != 200:
-                        return None
-
-                    html = await response.text()
-
-                    # Метод 1: JavaScript
-                    schedule_data = ScheduleParser._parse_js_data(html, city)
-                    if schedule_data:
-                        return schedule_data
-
-                    # Метод 2: HTML таблиця
-                    schedule_data = ScheduleParser._parse_html_table(html, city)
-                    if schedule_data:
-                        return schedule_data
-
-                    return {}
-
-        except Exception as e:
-            logger.error(f"[{city}] Помилка: {e}", exc_info=True)
-            return None
-
-    @staticmethod
-    def _parse_js_data(html: str, city: str) -> Optional[Dict[int, List[Dict]]]:
-        """Пошук JSON у JavaScript"""
-        patterns = [
-            r'var\s+schedule\s*=\s*(\{.+?\});',
-            r'const\s+schedule\s*=\s*(\{.+?\});',
-            r'let\s+schedule\s*=\s*(\{.+?\});',
-            r'var\s+groups\s*=\s*(\[.+?\]);',
-        ]
-
-        for pattern in patterns:
-            match = re.search(pattern, html, re.DOTALL)
-            if match:
-                try:
-                    json_str = match.group(1)
-                    data = json.loads(json_str)
-
-                    if isinstance(data, dict):
-                        return ScheduleParser._normalize_schedule_data(data)
-                    elif isinstance(data, list):
-                        return ScheduleParser._normalize_schedule_list(data)
-                except json.JSONDecodeError:
-                    continue
-
-        return None
-
-    @staticmethod
-    def _parse_html_table(html: str, city: str) -> Optional[Dict[int, List[Dict]]]:
-        """Парсинг HTML таблиці"""
+        # 2. Парсинг BeautifulSoup
         soup = BeautifulSoup(html, 'html.parser')
+        schedule_container = soup.find('div', {'id': 'gsv'})
 
-        table = soup.find('table', class_=re.compile(r'schedule|shutdowns|outages', re.I))
-        if not table:
-            tables = soup.find_all('table')
-            for t in tables:
-                if len(t.find_all('tr')) > 5:
-                    table = t
-                    break
+        if not schedule_container:
+            ScheduleParser._log_parse_result(city, "error", "Container not found", 0)
+            return {"success": False, "error": "Schedule container not found"}
 
-        if not table:
-            return None
+        # 3. Витягування часових інтервалів
+        time_intervals = ScheduleParser._extract_time_intervals(schedule_container)
+        logger.info(f"[{city}] ⏰ Знайдено {len(time_intervals)} часових інтервалів")
 
-        return ScheduleParser._parse_table_element(table, city)
+        # 4. Парсинг груп
+        today = datetime.now().strftime("%Y-%m-%d")
+        groups_parsed = 0
+        all_schedules = {}
 
-    @staticmethod
-    def _parse_table_element(table, city: str) -> Optional[Dict[int, List[Dict]]]:
-        """Парсинг елемента таблиці"""
-        schedule_data = {}
-
-        try:
-            headers = []
-            header_row = table.find('thead') or table.find('tr')
-
-            if header_row:
-                for th in header_row.find_all(['th', 'td']):
-                    text = th.get_text(strip=True)
-                    if re.search(r'\d{1,2}[:.\-]\d{1,2}', text):
-                        headers.append(text)
-
-            if not headers:
-                headers = [f"{i:02d}:00-{i + 2:02d}:00" for i in range(0, 24, 2)]
-
-            tbody = table.find('tbody')
-            rows = (tbody.find_all('tr') if tbody else table.find_all('tr'))[1:]
-
-            for row in rows:
-                cells = row.find_all(['td', 'th'])
-                if len(cells) < 2:
-                    continue
-
-                group_text = cells[0].get_text(strip=True)
-                group_match = re.search(r'\d+', group_text)
-
-                if not group_match:
-                    continue
-
-                group_num = int(group_match.group())
-                if group_num < 1 or group_num > 20:
-                    continue
-
-                schedule_data[group_num] = []
-
-                for i, cell in enumerate(cells[1:]):
-                    if i >= len(headers):
-                        break
-
-                    status = ScheduleParser._determine_cell_status(cell, city)
-
-                    schedule_data[group_num].append({
-                        'time': headers[i],
-                        'status': status
-                    })
-
-            return schedule_data if schedule_data else None
-
-        except Exception as e:
-            logger.error(f"[{city}] Помилка парсингу таблиці: {e}", exc_info=True)
-            return None
-
-    @staticmethod
-    def _determine_cell_status(cell, city: str) -> str:
-        """Визначення статусу комірки"""
-        style = str(cell.get('style', '')).lower()
-        classes = ' '.join(cell.get('class', [])).lower()
-        text = cell.get_text(strip=True).lower()
-        bgcolor = str(cell.get('bgcolor', '')).lower()
-
-        red_indicators = ['red', '#ff0000', '#f00', 'rgb(255,0,0)', 'danger', 'outage', 'off']
-        if any(ind in style or ind in classes or ind in bgcolor for ind in red_indicators):
-            return 'off'
-
-        green_indicators = ['green', '#00ff00', '#0f0', 'rgb(0,255,0)', 'success', 'on']
-        if any(ind in style or ind in classes or ind in bgcolor for ind in green_indicators):
-            return 'on'
-
-        maybe_indicators = ['yellow', 'gray', 'grey', 'warning', 'maybe']
-        if any(ind in style or ind in classes or ind in bgcolor for ind in maybe_indicators):
-            return 'maybe'
-
-        if any(word in text for word in ['відключення', 'немає', 'off']):
-            return 'off'
-        if any(word in text for word in ['можливо', 'maybe']):
-            return 'maybe'
-
-        return 'on'
-
-    @staticmethod
-    def _normalize_schedule_data(data: dict) -> Dict[int, List[Dict]]:
-        """Нормалізація даних"""
-        result = {}
-        for key, value in data.items():
-            try:
-                group_num = int(re.search(r'\d+', str(key)).group())
-                if isinstance(value, list):
-                    result[group_num] = value
-            except:
+        for group_num in range(1, city_data.get('groups_count', 12) + 1):
+            group_div = soup.find('div', {'id': f'inf{group_num}'})
+            if not group_div:
+                logger.warning(f"[{city}] Група {group_num} не знайдена")
                 continue
-        return result if result else None
+
+            # Парсинг статусів
+            schedule = ScheduleParser._parse_group_schedule(
+                group_div,
+                time_intervals,
+                group_num
+            )
+
+            if schedule:
+                # 5. Збереження в БД
+                ScheduleParser._save_to_db(city, group_num, today, schedule, html)
+                all_schedules[group_num] = schedule
+                groups_parsed += 1
+                logger.info(f"[{city}] ✅ Група {group_num}: {len(schedule)} інтервалів збережено")
+
+        # 6. Логування результату
+        ScheduleParser._log_parse_result(
+            city,
+            "success" if groups_parsed > 0 else "partial",
+            f"Parsed {groups_parsed} groups",
+            groups_parsed
+        )
+
+        return {
+            "success": True,
+            "city": city,
+            "date": today,
+            "groups_parsed": groups_parsed,
+            "total_intervals": len(time_intervals),
+            "schedules": all_schedules
+        }
 
     @staticmethod
-    def _normalize_schedule_list(data: list) -> Dict[int, List[Dict]]:
-        """Нормалізація list"""
-        result = {}
-        for item in data:
-            if isinstance(item, dict) and 'group' in item:
-                try:
-                    result[int(item['group'])] = item.get('schedule', [])
-                except:
-                    continue
-        return result if result else None
+    def _extract_time_intervals(container) -> List[str]:
+        """Витягування часових інтервалів з HTML"""
+        time_intervals = []
+        time_container = container.find('p')
+
+        if time_container:
+            for time_block in time_container.find_all('u', recursive=False):
+                main_time = time_block.find('b')
+                half_time = time_block.find('u')
+
+                if main_time:
+                    hour_text = main_time.get_text(strip=True)
+                    hour_match = re.search(r'(\d{2})', hour_text)
+
+                    if hour_match:
+                        hour = int(hour_match.group(1))
+                        next_hour = (hour + 1) % 24
+
+                        # Додаємо обидва інтервали (00-30 та 30-60)
+                        time_intervals.append(f"{hour:02d}:00-{hour:02d}:30")
+                        time_intervals.append(f"{hour:02d}:30-{next_hour:02d}:00")
+
+        return time_intervals
 
     @staticmethod
-    def save_schedule(city: str, group_number: int, date: str, schedule_data: str):
-        """Збереження графіку"""
+    def _parse_group_schedule(group_div, time_intervals: List[str], group_num: int) -> List[Dict]:
+        """Парсинг графіку конкретної групи"""
+        schedule = []
+        cells = group_div.find_all(['u', 'o', 's'])
+
+        for idx, cell in enumerate(cells):
+            if idx >= len(time_intervals):
+                break
+
+            tag_name = cell.name
+            cell_text = cell.get_text(strip=True).lower()
+
+            # Визначення статусу на основі тегу
+            if tag_name == 'o':  # <o> = червоний = відключення
+                status = 'off'
+            elif tag_name == 's':  # <s> = можливо
+                status = 'maybe'
+            elif tag_name == 'u':  # <u> = зелений = світло є
+                status = 'on'
+            else:
+                status = 'on'
+
+            # Додаткова перевірка по тексту
+            if 'в' in cell_text or 'відкл' in cell_text:
+                status = 'off'
+            elif 'мз' in cell_text or 'можливо' in cell_text:
+                status = 'maybe'
+
+            schedule.append({
+                'time': time_intervals[idx],
+                'status': status,
+                'raw': cell_text
+            })
+
+        return schedule
+
+    @staticmethod
+    def _save_to_db(city: str, group_number: int, date: str, schedule: List[Dict], raw_html: str):
+        """Збереження спарсених даних в БД"""
         with get_db() as conn:
-            conn.execute("""
-                INSERT INTO schedules (city, group_number, date, schedule_data)
-                VALUES (?, ?, ?, ?)
+            # Зберігаємо JSON графіку
+            schedule_json = json.dumps(schedule, ensure_ascii=False)
+
+            cursor = conn.execute("""
+                INSERT INTO schedules (city, group_number, date, schedule_data, raw_html)
+                VALUES (?, ?, ?, ?, ?)
                 ON CONFLICT(city, group_number, date) DO UPDATE SET
                     schedule_data = excluded.schedule_data,
+                    raw_html = excluded.raw_html,
                     updated_at = CURRENT_TIMESTAMP
-            """, (city, group_number, date, schedule_data))
+            """, (city, group_number, date, schedule_json, raw_html[:10000]))  # Обмежуємо HTML
+
+            schedule_id = cursor.lastrowid
+
+            # Зберігаємо структуровані інтервали
+            conn.execute("DELETE FROM schedule_intervals WHERE schedule_id = ?", (schedule_id,))
+
+            for interval in schedule:
+                time_parts = interval['time'].split('-')
+                if len(time_parts) == 2:
+                    conn.execute("""
+                        INSERT INTO schedule_intervals (schedule_id, time_start, time_end, status)
+                        VALUES (?, ?, ?, ?)
+                    """, (schedule_id, time_parts[0], time_parts[1], interval['status']))
+
             conn.commit()
 
     @staticmethod
-    def get_schedule(city: str, group_number: int, date: str) -> Optional[str]:
-        """Отримання графіку"""
+    def _log_parse_result(city: str, status: str, message: str, groups_parsed: int):
+        """Логування результатів парсингу"""
+        with get_db() as conn:
+            conn.execute("""
+                INSERT INTO parse_logs (city, status, message, groups_parsed)
+                VALUES (?, ?, ?, ?)
+            """, (city, status, message, groups_parsed))
+            conn.commit()
+
+    @staticmethod
+    def get_schedule_from_db(city: str, group_number: int, date: str) -> Optional[List[Dict]]:
+        """Отримання графіку з БД"""
         with get_db() as conn:
             row = conn.execute(
                 "SELECT schedule_data FROM schedules WHERE city = ? AND group_number = ? AND date = ?",
                 (city, group_number, date)
             ).fetchone()
-            return row['schedule_data'] if row else None
+
+            if row and row['schedule_data']:
+                try:
+                    return json.loads(row['schedule_data'])
+                except json.JSONDecodeError:
+                    return None
+            return None
+
+    @staticmethod
+    def get_schedule_metadata(city: str, group_number: int, date: str) -> Optional[Dict]:
+        """Отримання метаданих графіку"""
+        with get_db() as conn:
+            row = conn.execute("""
+                SELECT parsed_at, updated_at 
+                FROM schedules 
+                WHERE city = ? AND group_number = ? AND date = ?
+            """, (city, group_number, date)).fetchone()
+
+            return dict(row) if row else None
 
 
-# Форматування
+# Форматування для виводу в Telegram
 def format_schedule(schedule: List[Dict], city_data: dict = None) -> str:
-    """Форматування графіку"""
+    """Форматування графіку для відображення в Telegram"""
     if not schedule:
         return "✅ Наразі планових відключень немає!"
 
@@ -622,12 +501,17 @@ def format_schedule(schedule: List[Dict], city_data: dict = None) -> str:
 
     text = "📊 Графік відключень на сьогодні:\n\n"
 
+    # Групуємо послідовні відключення
+    current_block = None
+
     for item in schedule:
         emoji = {"off": "🔴", "on": "🟢", "maybe": "⚪"}.get(item['status'], "⚪")
         status_text = {"off": "Відключення", "on": "Світло є", "maybe": "Можливо"}.get(item['status'], "Невідомо")
+
         text += f"{emoji} {item['time']} - {status_text}\n"
 
-    text += "\n🔴 - гарантоване відключення\n"
+    text += "\n━━━━━━━━━━━━━━━━━━\n"
+    text += "🔴 - гарантоване відключення\n"
     text += "🟢 - гарантоване включення\n"
     text += "⚪ - можливе включення\n"
 
@@ -642,6 +526,7 @@ def get_main_keyboard(user_city: str = "chernivtsi") -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text="🔄 Оновити графік", callback_data="refresh_schedule")],
         [InlineKeyboardButton(text=f"🏙 Місто: {city_name}", callback_data="change_city")],
         [InlineKeyboardButton(text="⚙️ Змінити групу", callback_data="change_group")],
+        [InlineKeyboardButton(text="📈 Статистика", callback_data="stats")],
         [InlineKeyboardButton(text="🔔 Налаштування", callback_data="settings")],
         [InlineKeyboardButton(text="❓ Допомога", callback_data="help")]
     ]
@@ -659,13 +544,15 @@ def get_cities_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=keyboard)
 
 
-def get_groups_keyboard() -> InlineKeyboardMarkup:
+def get_groups_keyboard(city: str = "chernivtsi") -> InlineKeyboardMarkup:
+    groups_count = CITIES.get(city, {}).get('groups_count', 18)
     keyboard = []
-    for i in range(0, 18, 3):
+
+    for i in range(0, groups_count, 3):
         row = []
         for j in range(3):
             group_num = i + j + 1
-            if group_num <= 18:
+            if group_num <= groups_count:
                 row.append(InlineKeyboardButton(
                     text=f"Група {group_num}",
                     callback_data=f"group_{group_num}"
@@ -694,10 +581,11 @@ async def cmd_start(message: Message):
 
     welcome_text = (
         "👋 Вітаю! Я бот для відстеження графіків відключення світла.\n\n"
-        "🔹 Я буду надсилати вам:\n"
-        "  • Актуальний графік відключень\n"
-        "  • Сповіщення за 30 хв до відключення\n"
-        "  • Інформацію про зміни в графіку\n\n"
+        "🔹 Я автоматично:\n"
+        "  • Парсю графіки з офіційних сайтів\n"
+        "  • Зберігаю дані в базу\n"
+        "  • Надсилаю сповіщення за 30 хв до відключення\n"
+        "  • Показую актуальну інформацію\n\n"
     )
 
     if user and user.get('group_number'):
@@ -716,176 +604,72 @@ async def cmd_start(message: Message):
 
 @router.message(Command("update"))
 async def cmd_update(message: Message):
-    """Команда для ручного оновлення графіків"""
-    await message.answer("⏳ Оновлюю графіки...")
+    """Примусове оновлення графіків"""
+    await message.answer("⏳ Парсю графіки з сайту та оновлюю базу даних...")
 
     bot = message.bot
-    await update_schedules(bot)
+    result = await update_schedules(bot, force=True)
 
-    await message.answer("✅ Графіки оновлено!")
-
-
-@router.message(Command("debug"))
-async def cmd_debug(message: Message):
-    """Команда для відладки"""
-    user = UserManager.get_user(message.from_user.id)
-
-    if not user:
-        await message.answer("❌ Користувача не знайдено в базі даних")
-        return
-
-    debug_text = "🔍 Ваші дані в системі:\n\n"
-    debug_text += f"User ID: {user['user_id']}\n"
-    debug_text += f"Username: {user.get('username', 'N/A')}\n"
-    debug_text += f"Місто: {user.get('city', 'N/A')}\n"
-    debug_text += f"Група: {user.get('group_number', 'N/A')}\n"
-    debug_text += f"Сповіщення: {'✅' if user.get('notifications_enabled') else '❌'}\n"
-
-    if user.get('group_number') and user.get('city'):
-        today = datetime.now().strftime("%Y-%m-%d")
-        schedule_data = ScheduleParser.get_schedule(user['city'], user['group_number'], today)
-        debug_text += f"\nГрафік в БД: {'✅ Є' if schedule_data else '❌ Немає'}"
-
-    await message.answer(debug_text)
-
-
-@router.message(Command("test"))
-async def cmd_test(message: Message):
-    """Тестове оновлення для конкретного міста"""
-    user = UserManager.get_user(message.from_user.id)
-    city = user.get('city', 'chernivtsi') if user else 'chernivtsi'
-    city_name = CITIES[city]['name']
-
-    await message.answer(f"⏳ Тестую парсинг для {city_name}...")
-
-    schedules = await ScheduleParser.fetch_schedule(city)
-
-    if schedules is None:
-        await message.answer(f"❌ Помилка завантаження для {city_name}")
-    elif not schedules:
-        await message.answer(f"✅ Графіки для {city_name} порожні (відключень немає)")
+    if result.get('success'):
+        await message.answer(
+            f"✅ Графіки оновлено!\n\n"
+            f"📊 Міст: {result.get('cities_updated', 0)}\n"
+            f"👥 Груп: {result.get('groups_updated', 0)}"
+        )
     else:
-        text = f"✅ Успішно! {city_name}\nЗнайдено {len(schedules)} груп\n\n"
+        await message.answer("❌ Помилка оновлення. Спробуйте пізніше.")
 
-        # Показуємо приклад першої групи
-        first_group = min(schedules.keys())
-        text += f"Приклад (група {first_group}):\n"
-        for item in schedules[first_group][:5]:
-            emoji = {"off": "🔴", "on": "🟢", "maybe": "⚪", "info": "ℹ️"}.get(item['status'], "⚪")
-            text += f"{emoji} {item['time']}: {item['status']}\n"
 
-        await message.answer(text)
+@router.message(Command("stats"))
+async def cmd_stats(message: Message):
+    """Статистика парсингу"""
+    with get_db() as conn:
+        # Останні логи
+        logs = conn.execute("""
+            SELECT city, status, message, groups_parsed, created_at 
+            FROM parse_logs 
+            ORDER BY created_at DESC 
+            LIMIT 10
+        """).fetchall()
+
+        # Загальна статистика
+        stats = conn.execute("""
+            SELECT 
+                city,
+                COUNT(DISTINCT date) as days_parsed,
+                COUNT(DISTINCT group_number) as groups_count,
+                MAX(updated_at) as last_update
+            FROM schedules
+            GROUP BY city
+        """).fetchall()
+
+    text = "📈 Статистика парсингу\n\n"
+
+    if stats:
+        text += "🗂 Збережено в БД:\n"
+        for stat in stats:
+            city_name = CITIES.get(stat['city'], {}).get('name', stat['city'])
+            text += f"• {city_name}: {stat['groups_count']} груп, {stat['days_parsed']} днів\n"
+            text += f"  Оновлено: {stat['last_update'][:16]}\n"
+
+    text += "\n📋 Останні операції:\n"
+    for log in logs[:5]:
+        city_name = CITIES.get(log['city'], {}).get('name', log['city'])
+        emoji = "✅" if log['status'] == 'success' else "⚠️" if log['status'] == 'partial' else "❌"
+        text += f"{emoji} {city_name}: {log['groups_parsed']} груп\n"
+
+    await message.answer(text)
+
+
+@router.callback_query(F.data == "stats")
+async def show_stats(callback: CallbackQuery):
+    await callback.answer()
+    await cmd_stats(callback.message)
 
 
 @router.callback_query(F.data == "my_schedule")
 async def show_schedule(callback: CallbackQuery):
     await callback.answer()
-
-    user = UserManager.get_user(callback.from_user.id)
-
-    if not user:
-        await callback.message.answer(
-            "❌ Помилка: користувача не знайдено в базі даних.\nСпробуйте /start",
-            reply_markup=get_cities_keyboard()
-        )
-        return
-
-    if not user.get('group_number'):
-        await callback.message.answer(
-            "❌ Спочатку оберіть місто та групу відключень",
-            reply_markup=get_cities_keyboard()
-        )
-        return
-
-    city = user.get('city', 'chernivtsi')
-    group_num = user['group_number']
-    city_data = CITIES.get(city, {})
-    city_name = city_data.get('name', 'Чернівці')
-
-    # Перевірка на спеціальні типи парсерів
-    parser_type = city_data.get('parser_type', 'default')
-
-    if parser_type == 'kyiv_address_based':
-        await callback.message.answer(
-            f"🏙 {city_name}\n\n"
-            "⚠️ Для Києва графіки відображаються по конкретних адресах.\n\n"
-            "Будь ласка, перевірте свій графік на сайті:\n"
-            f"{city_data['schedule_url']}\n\n"
-            "Введіть свою адресу на сайті для перегляду графіку.",
-            reply_markup=get_main_keyboard(city)
-        )
-        return
-
-    if parser_type == 'image_based':
-        await callback.message.answer(
-            f"🏙 {city_name}\n\n"
-            "📷 Графіки для цього міста публікуються у форматі зображення.\n\n"
-            "Перегляньте актуальний графік на сайті:\n"
-            f"{city_data['schedule_url']}",
-            reply_markup=get_main_keyboard(city)
-        )
-        return
-
-    # Отримуємо графік з БД
-    today = datetime.now().strftime("%Y-%m-%d")
-    schedule_data = ScheduleParser.get_schedule(city, group_num, today)
-
-    if not schedule_data:
-        # Спробуємо завантажити
-        await callback.message.answer("⏳ Завантажую актуальний графік...")
-
-        try:
-            schedules = await ScheduleParser.fetch_schedule(city)
-            if schedules and group_num in schedules:
-                schedule_json = json.dumps(schedules[group_num], ensure_ascii=False)
-                ScheduleParser.save_schedule(city, group_num, today, schedule_json)
-                schedule_data = schedule_json
-            elif schedules is not None and not schedules:
-                schedule_json = json.dumps([], ensure_ascii=False)
-                ScheduleParser.save_schedule(city, group_num, today, schedule_json)
-                schedule_data = schedule_json
-        except Exception as e:
-            logger.error(f"Error fetching schedule: {e}", exc_info=True)
-
-        if not schedule_data:
-            await callback.message.answer(
-                f"📊 Графік для {city_name}, група {group_num} поки недоступний.\n\n"
-                "Можливо:\n"
-                "• Графік ще не оновлено\n"
-                "• Проблеми з сайтом енергопостачальника\n\n"
-                f"Перевірте на сайті:\n{city_data['schedule_url']}",
-                reply_markup=get_main_keyboard(city)
-            )
-            return
-
-    # Парсимо і форматуємо
-    try:
-        schedule = json.loads(schedule_data)
-        text = format_schedule(schedule, city_data)
-        text = f"🏙 {city_name}\n⚡️ Група {group_num}\n\n" + text
-
-        # Додаємо час оновлення
-        with get_db() as conn:
-            updated = conn.execute(
-                "SELECT updated_at FROM schedules WHERE city = ? AND group_number = ? AND date = ?",
-                (city, group_num, today)
-            ).fetchone()
-            if updated:
-                text += f"\n\n🕐 Оновлено: {updated['updated_at']}"
-
-        await callback.message.answer(text, reply_markup=get_main_keyboard(city))
-    except json.JSONDecodeError as e:
-        logger.error(f"JSON decode error: {e}")
-        await callback.message.answer(
-            "❌ Помилка читання графіку. Спробуйте пізніше.",
-            reply_markup=get_main_keyboard(city)
-        )
-
-
-@router.callback_query(F.data == "refresh_schedule")
-async def refresh_schedule(callback: CallbackQuery):
-    """Оновлення графіку для користувача"""
-    await callback.answer("⏳ Оновлюю...")
 
     user = UserManager.get_user(callback.from_user.id)
 
@@ -901,40 +685,77 @@ async def refresh_schedule(callback: CallbackQuery):
     city_data = CITIES.get(city, {})
     city_name = city_data.get('name', 'Чернівці')
 
-    try:
-        schedules = await ScheduleParser.fetch_schedule(city)
-        today = datetime.now().strftime("%Y-%m-%d")
+    # Отримання з БД
+    today = datetime.now().strftime("%Y-%m-%d")
+    schedule = ScheduleParser.get_schedule_from_db(city, group_num, today)
+    metadata = ScheduleParser.get_schedule_metadata(city, group_num, today)
 
-        if schedules and group_num in schedules:
-            schedule_json = json.dumps(schedules[group_num], ensure_ascii=False)
-            ScheduleParser.save_schedule(city, group_num, today, schedule_json)
+    if not schedule:
+        # Спробуємо завантажити
+        await callback.message.answer("⏳ Завантажую з сайту...")
 
-            schedule = schedules[group_num]
+        result = await ScheduleParser.fetch_and_parse(city)
+
+        if result.get('success'):
+            schedule = result['schedules'].get(group_num)
+            metadata = {"updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
+
+        if not schedule:
+            await callback.message.answer(
+                f"📊 Графік для {city_name}, група {group_num} недоступний.\n\n"
+                f"Перевірте на сайті:\n{city_data['schedule_url']}",
+                reply_markup=get_main_keyboard(city)
+            )
+            return
+
+    # Форматування та відправка
+    text = format_schedule(schedule, city_data)
+    text = f"🏙 {city_name}\n⚡️ Група {group_num}\n\n" + text
+
+    if metadata:
+        text += f"\n\n🕐 Оновлено: {metadata['updated_at'][:16]}"
+
+    await callback.message.answer(text, reply_markup=get_main_keyboard(city))
+
+
+@router.callback_query(F.data == "refresh_schedule")
+async def refresh_schedule(callback: CallbackQuery):
+    await callback.answer("🔄 Оновлюю графік...")
+
+    user = UserManager.get_user(callback.from_user.id)
+
+    if not user or not user.get('group_number'):
+        await callback.message.answer(
+            "❌ Спочатку оберіть місто та групу відключень",
+            reply_markup=get_cities_keyboard()
+        )
+        return
+
+    city = user.get('city', 'chernivtsi')
+    group_num = user['group_number']
+    city_data = CITIES.get(city, {})
+    city_name = city_data.get('name', 'Чернівці')
+
+    # Примусове оновлення
+    result = await ScheduleParser.fetch_and_parse(city)
+
+    if result.get('success'):
+        schedule = result['schedules'].get(group_num)
+
+        if schedule:
             text = format_schedule(schedule, city_data)
             text = f"🏙 {city_name}\n⚡️ Група {group_num}\n\n" + text
-            text += f"\n\n🕐 Оновлено щойно"
+            text += f"\n\n🕐 Оновлено: {datetime.now().strftime('%H:%M:%S')}"
 
             await callback.message.answer(text, reply_markup=get_main_keyboard(city))
-        elif schedules is not None and not schedules:
-            schedule_json = json.dumps([], ensure_ascii=False)
-            ScheduleParser.save_schedule(city, group_num, today, schedule_json)
-
-            await callback.message.answer(
-                f"🏙 {city_name}\n⚡️ Група {group_num}\n\n"
-                "✅ Чудові новини! Сьогодні планових відключень для вашої групи немає!\n\n"
-                "🕐 Оновлено щойно",
-                reply_markup=get_main_keyboard(city)
-            )
         else:
             await callback.message.answer(
-                f"❌ Не вдалося завантажити графік для {city_name}\n"
-                "Спробуйте пізніше або перевірте на сайті",
+                f"❌ Не вдалося отримати графік для групи {group_num}",
                 reply_markup=get_main_keyboard(city)
             )
-    except Exception as e:
-        logger.error(f"Error refreshing schedule: {e}", exc_info=True)
+    else:
         await callback.message.answer(
-            "❌ Помилка оновлення графіку. Спробуйте пізніше.",
+            "❌ Помилка оновлення. Спробуйте пізніше.",
             reply_markup=get_main_keyboard(city)
         )
 
@@ -942,109 +763,141 @@ async def refresh_schedule(callback: CallbackQuery):
 @router.callback_query(F.data == "change_city")
 async def change_city(callback: CallbackQuery):
     await callback.answer()
-    await callback.message.answer(
-        "🏙 Оберіть місто:\n\n"
-        "⚠️ - особливості отримання графіку",
+    await callback.message.edit_text(
+        "🏙 Оберіть ваше місто:",
         reply_markup=get_cities_keyboard()
     )
 
 
 @router.callback_query(F.data.startswith("city_"))
 async def select_city(callback: CallbackQuery):
+    city_id = callback.data.split("_")[1]
+    city_data = CITIES.get(city_id)
+
+    if not city_data:
+        await callback.answer("❌ Місто не знайдено")
+        return
+
     await callback.answer()
 
-    city_id = callback.data.split("_")[1]
-    city_data = CITIES.get(city_id, {})
-    city_name = city_data.get('name', 'Невідоме місто')
-
+    # Оновлюємо місто користувача
     UserManager.update_city(callback.from_user.id, city_id)
 
-    user_cities = UserManager.get_user_cities(callback.from_user.id)
-    existing_group = next((uc['group_number'] for uc in user_cities if uc['city'] == city_id), None)
+    city_name = city_data['name']
 
-    message_text = f"✅ Місто {city_name} встановлено!\n\n"
-
-    if city_data.get('note'):
-        message_text += f"ℹ️ {city_data['note']}\n\n"
-
-    if existing_group:
-        UserManager.update_group(callback.from_user.id, existing_group)
-        message_text += f"⚡️ Ваша збережена група: {existing_group}"
-        await callback.message.answer(message_text, reply_markup=get_main_keyboard(city_id))
+    if city_data.get('parser_type') == 'address_based':
+        await callback.message.edit_text(
+            f"🏙 Обрано: {city_name}\n\n"
+            f"⚠️ Для {city_name} потрібно вказати адресу.\n"
+            f"Використовуйте пошук на сайті:\n{city_data['schedule_url']}",
+            reply_markup=get_main_keyboard(city_id)
+        )
+    elif city_data.get('parser_type') == 'image_based':
+        await callback.message.edit_text(
+            f"🏙 Обрано: {city_name}\n\n"
+            f"⚠️ Графік у форматі зображення.\n"
+            f"Перегляньте на сайті:\n{city_data['schedule_url']}",
+            reply_markup=get_main_keyboard(city_id)
+        )
     else:
-        message_text += "Тепер оберіть групу відключень:"
-        await callback.message.answer(message_text, reply_markup=get_groups_keyboard())
+        await callback.message.edit_text(
+            f"🏙 Обрано: {city_name}\n\n"
+            f"Тепер оберіть вашу групу відключень:",
+            reply_markup=get_groups_keyboard(city_id)
+        )
 
 
 @router.callback_query(F.data == "change_group")
 async def change_group(callback: CallbackQuery):
     await callback.answer()
-    await callback.message.answer(
-        "Оберіть свою групу відключень:",
-        reply_markup=get_groups_keyboard()
+
+    user = UserManager.get_user(callback.from_user.id)
+    city = user.get('city', 'chernivtsi') if user else 'chernivtsi'
+
+    await callback.message.edit_text(
+        "⚡️ Оберіть вашу групу відключень:",
+        reply_markup=get_groups_keyboard(city)
     )
 
 
 @router.callback_query(F.data.startswith("group_"))
 async def select_group(callback: CallbackQuery):
+    group_num = int(callback.data.split("_")[1])
+
     await callback.answer()
 
-    group_num = int(callback.data.split("_")[1])
+    # Оновлюємо групу
+    UserManager.update_group(callback.from_user.id, group_num)
     user = UserManager.get_user(callback.from_user.id)
-
-    if not user:
-        UserManager.save_user(
-            callback.from_user.id,
-            callback.from_user.username or "Unknown",
-            city="chernivtsi",
-            group_number=group_num
-        )
-        user = UserManager.get_user(callback.from_user.id)
 
     city = user.get('city', 'chernivtsi')
     city_name = CITIES.get(city, {}).get('name', 'Чернівці')
 
-    UserManager.update_group(callback.from_user.id, group_num)
-
-    await callback.message.answer(
+    await callback.message.edit_text(
         f"✅ Налаштування збережено!\n\n"
         f"🏙 Місто: {city_name}\n"
         f"⚡️ Група: {group_num}\n\n"
-        "Тепер ви будете отримувати сповіщення про відключення.",
+        f"Завантажую ваш графік...",
         reply_markup=get_main_keyboard(city)
     )
 
+    # Завантажуємо графік
+    today = datetime.now().strftime("%Y-%m-%d")
+    schedule = ScheduleParser.get_schedule_from_db(city, group_num, today)
+
+    if not schedule:
+        result = await ScheduleParser.fetch_and_parse(city)
+        if result.get('success'):
+            schedule = result['schedules'].get(group_num)
+
+    if schedule:
+        text = format_schedule(schedule, CITIES.get(city))
+        text = f"🏙 {city_name}\n⚡️ Група {group_num}\n\n" + text
+        await callback.message.answer(text, reply_markup=get_main_keyboard(city))
+
 
 @router.callback_query(F.data == "settings")
-async def settings(callback: CallbackQuery):
+async def show_settings(callback: CallbackQuery):
     await callback.answer()
 
     user = UserManager.get_user(callback.from_user.id)
-    enabled = user.get('notifications_enabled', 1) if user else 1
 
-    status = "✅ Увімкнено" if enabled else "❌ Вимкнено"
+    if not user:
+        await callback.message.answer("❌ Помилка: користувач не знайдений")
+        return
+
+    notifications_status = "✅ Увімкнено" if user.get('notifications_enabled', 1) else "❌ Вимкнено"
+    city_name = CITIES.get(user.get('city', 'chernivtsi'), {}).get('name', 'Чернівці')
+
+    text = (
+        "⚙️ Налаштування\n\n"
+        f"🏙 Місто: {city_name}\n"
+        f"⚡️ Група: {user.get('group_number', 'не обрано')}\n"
+        f"🔔 Сповіщення: {notifications_status}\n"
+    )
 
     keyboard = [
         [InlineKeyboardButton(
-            text="🔕 Вимкнути сповіщення" if enabled else "🔔 Увімкнути сповіщення",
+            text="🔔 Увімкнути сповіщення" if not user.get('notifications_enabled', 1) else "🔕 Вимкнути сповіщення",
             callback_data="toggle_notifications"
         )],
+        [InlineKeyboardButton(text="🏙 Змінити місто", callback_data="change_city")],
+        [InlineKeyboardButton(text="⚡️ Змінити групу", callback_data="change_group")],
         [InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_menu")]
     ]
 
-    await callback.message.answer(
-        f"⚙️ Налаштування\n\nСповіщення: {status}",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard)
-    )
+    await callback.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard))
 
 
 @router.callback_query(F.data == "toggle_notifications")
-async def toggle_notif(callback: CallbackQuery):
-    enabled = UserManager.toggle_notifications(callback.from_user.id)
-    status = "увімкнено" if enabled else "вимкнено"
+async def toggle_notifications(callback: CallbackQuery):
+    new_state = UserManager.toggle_notifications(callback.from_user.id)
 
-    await callback.answer(f"Сповіщення {status}")
-    await settings(callback)
+    status = "увімкнено" if new_state else "вимкнено"
+    await callback.answer(f"🔔 Сповіщення {status}")
+
+    # Оновлюємо меню налаштувань
+    await show_settings(callback)
 
 
 @router.callback_query(F.data == "help")
@@ -1052,189 +905,219 @@ async def show_help(callback: CallbackQuery):
     await callback.answer()
 
     help_text = (
-        "❓ Допомога\n\n"
-        "📋 Команди:\n"
+        "❓ Довідка\n\n"
+        "🔹 Команди:\n"
         "/start - Головне меню\n"
-        "/update - Оновити графіки вручну\n"
-        "/debug - Показати збережені налаштування\n"
-        "/test - Тестування парсингу для вашого міста\n\n"
-        "🏙 Доступні міста:\n"
+        "/update - Оновити графіки\n"
+        "/stats - Статистика парсингу\n\n"
+        "🔹 Як це працює:\n"
+        "1. Бот автоматично парсить графіки з офіційних сайтів\n"
+        "2. Дані зберігаються в базу даних\n"
+        "3. Ви отримуєте сповіщення за 30 хв до відключення\n"
+        "4. Графік оновлюється кожні 6 годин\n\n"
+        "🔹 Підтримувані міста:\n"
     )
 
     for city_data in CITIES.values():
-        help_text += f"  • {city_data['name']}"
-        if city_data.get('note'):
-            help_text += f" - {city_data['note']}"
-        help_text += "\n"
+        help_text += f"• {city_data['name']}\n"
 
-    help_text += (
-        "\n❓ Як дізнатися свою групу?\n"
-        "Перейдіть на сайт енергопостачальника\n"
-        "вашого міста та введіть свою адресу.\n\n"
-        "🔧 Якщо графік не показується:\n"
-        "1. Використайте /debug щоб перевірити налаштування\n"
-        "2. Спробуйте /update для оновлення графіків\n"
-        "3. Використайте /test для тестування парсингу\n"
-        "4. Переоберіть місто та групу через меню"
-    )
+    help_text += "\n📞 Підтримка: @your_support"
 
-    user = UserManager.get_user(callback.from_user.id)
-    city = user.get('city', 'chernivtsi') if user else 'chernivtsi'
-
-    await callback.message.answer(help_text, reply_markup=get_main_keyboard(city))
+    keyboard = [[InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_menu")]]
+    await callback.message.edit_text(help_text, reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard))
 
 
 @router.callback_query(F.data == "back_to_menu")
 async def back_to_menu(callback: CallbackQuery):
     await callback.answer()
+
     user = UserManager.get_user(callback.from_user.id)
     city = user.get('city', 'chernivtsi') if user else 'chernivtsi'
 
-    await callback.message.answer(
-        "Головне меню:",
+    await callback.message.edit_text(
+        "📊 Головне меню",
         reply_markup=get_main_keyboard(city)
     )
 
 
-# Scheduled tasks
-async def update_schedules(bot: Bot):
-    """Оновлення графіків для всіх міст"""
-    logger.info("📅 Оновлення графіків для всіх міст...")
+# Автоматичне оновлення графіків
+async def update_schedules(bot: Bot, force: bool = False) -> Dict:
+    """
+    Автоматичне оновлення графіків для всіх міст
+    """
+    logger.info("🔄 Початок автоматичного оновлення графіків")
 
-    today = datetime.now().strftime("%Y-%m-%d")
+    results = {
+        'success': True,
+        'cities_updated': 0,
+        'groups_updated': 0,
+        'errors': []
+    }
 
     for city_id, city_data in CITIES.items():
-        try:
-            parser_type = city_data.get('parser_type', 'default')
+        if city_data.get('parser_type') == 'chernivtsi_html':
+            try:
+                logger.info(f"[{city_id}] Оновлення графіків...")
+                result = await ScheduleParser.fetch_and_parse(city_id)
 
-            # Пропускаємо міста з особливими типами парсерів
-            if parser_type in ['kyiv_address_based', 'image_based']:
-                logger.info(f"[{city_id}] Пропускаємо автооновлення ({parser_type})")
-                continue
+                if result.get('success'):
+                    results['cities_updated'] += 1
+                    results['groups_updated'] += result.get('groups_parsed', 0)
+                    logger.info(f"[{city_id}] ✅ Оновлено {result.get('groups_parsed', 0)} груп")
+                else:
+                    results['errors'].append(f"{city_id}: {result.get('error', 'Unknown error')}")
+                    logger.error(f"[{city_id}] ❌ Помилка: {result.get('error')}")
 
-            logger.info(f"[{city_id}] Початок оновлення...")
-            schedules = await ScheduleParser.fetch_schedule(city_id)
+            except Exception as e:
+                results['errors'].append(f"{city_id}: {str(e)}")
+                logger.error(f"[{city_id}] ❌ Exception: {e}", exc_info=True)
 
-            if schedules is None:
-                logger.warning(f"[{city_id}] Не вдалося отримати графіки")
-                continue
+    if results['errors']:
+        results['success'] = False
 
-            if not schedules:
-                logger.info(f"[{city_id}] Графіки порожні - відключень немає")
-                for group_num in range(1, 19):
-                    schedule_json = json.dumps([], ensure_ascii=False)
-                    ScheduleParser.save_schedule(city_id, group_num, today, schedule_json)
-            else:
-                for group_num, schedule in schedules.items():
-                    schedule_json = json.dumps(schedule, ensure_ascii=False)
-                    ScheduleParser.save_schedule(city_id, group_num, today, schedule_json)
+    logger.info(
+        f"🔄 Оновлення завершено: "
+        f"{results['cities_updated']} міст, "
+        f"{results['groups_updated']} груп, "
+        f"{len(results['errors'])} помилок"
+    )
 
-                logger.info(f"[{city_id}] ✅ Оновлено: {len(schedules)} груп")
-
-        except Exception as e:
-            logger.error(f"[{city_id}] ❌ Помилка: {e}", exc_info=True)
-
-    logger.info("📅 Оновлення завершено")
+    return results
 
 
+# Сповіщення користувачів
 async def send_notifications(bot: Bot):
-    """Надсилання сповіщень про відключення"""
+    """
+    Надсилання сповіщень за 30 хвилин до відключення
+    """
     logger.info("🔔 Перевірка сповіщень...")
 
     now = datetime.now()
-    target_time = now + timedelta(minutes=30)
-    target_hour = target_time.strftime("%H")
+    notification_time = (now + timedelta(minutes=30)).strftime("%H:%M")
     today = now.strftime("%Y-%m-%d")
 
-    for city_id, city_data in CITIES.items():
-        # Пропускаємо міста з особливими парсерами
-        if city_data.get('parser_type') in ['kyiv_address_based', 'image_based']:
+    with get_db() as conn:
+        # Отримуємо всі графіки на сьогодні
+        schedules = conn.execute("""
+            SELECT city, group_number, schedule_data
+            FROM schedules
+            WHERE date = ?
+        """, (today,)).fetchall()
+
+    notifications_sent = 0
+
+    for schedule_row in schedules:
+        city = schedule_row['city']
+        group_num = schedule_row['group_number']
+
+        try:
+            schedule = json.loads(schedule_row['schedule_data'])
+        except json.JSONDecodeError:
             continue
 
-        with get_db() as conn:
-            schedules = conn.execute(
-                "SELECT DISTINCT group_number FROM schedules WHERE city = ? AND date = ?",
-                (city_id, today)
-            ).fetchall()
+        # Перевіряємо чи є відключення в найближчі 30 хвилин
+        for interval in schedule:
+            if interval['status'] == 'off':
+                time_start = interval['time'].split('-')[0]
 
-        for row in schedules:
-            group_num = row['group_number']
-            users = UserManager.get_users_by_city_and_group(city_id, group_num)
+                # Якщо відключення через ~30 хвилин
+                if time_start <= notification_time <= interval['time'].split('-')[1]:
+                    # Отримуємо користувачів цієї групи
+                    users = UserManager.get_users_by_city_and_group(city, group_num)
 
-            if not users:
-                continue
+                    for user in users:
+                        # Перевіряємо чи не надсилали вже сьогодні
+                        with get_db() as conn:
+                            already_sent = conn.execute("""
+                                SELECT id FROM notifications_sent
+                                WHERE user_id = ? AND city = ? AND group_number = ? AND date = ? AND time = ?
+                            """, (user['user_id'], city, group_num, today, interval['time'])).fetchone()
 
-            schedule_json = ScheduleParser.get_schedule(city_id, group_num, today)
-            if not schedule_json:
-                continue
-
-            try:
-                schedule = json.loads(schedule_json)
-
-                if not schedule:
-                    continue
-
-                for item in schedule:
-                    if item['status'] == 'off' and target_hour in item['time']:
-                        for user in users:
+                        if not already_sent:
                             try:
-                                await bot.send_message(
-                                    user['user_id'],
-                                    f"⚠️ Увага! Через 30 хвилин (о {item['time']}) "
-                                    f"очікується відключення світла\n\n"
-                                    f"🏙 {city_data['name']}\n"
-                                    f"⚡️ Група {group_num}"
+                                city_name = CITIES.get(city, {}).get('name', city)
+                                message = (
+                                    f"⚠️ Попередження!\n\n"
+                                    f"🏙 {city_name}\n"
+                                    f"⚡️ Група {group_num}\n\n"
+                                    f"🔴 Через 30 хвилин планове відключення:\n"
+                                    f"⏰ {interval['time']}"
                                 )
-                                logger.info(f"✉️ Сповіщення надіслано {user['user_id']}")
+
+                                await bot.send_message(user['user_id'], message)
+
+                                # Зберігаємо що відправили
+                                with get_db() as conn:
+                                    conn.execute("""
+                                        INSERT INTO notifications_sent (user_id, city, group_number, date, time)
+                                        VALUES (?, ?, ?, ?, ?)
+                                    """, (user['user_id'], city, group_num, today, interval['time']))
+                                    conn.commit()
+
+                                notifications_sent += 1
+                                logger.info(f"🔔 Надіслано сповіщення користувачу {user['user_id']}")
+
                             except Exception as e:
-                                logger.error(f"❌ Помилка надсилання {user['user_id']}: {e}")
-            except json.JSONDecodeError:
-                logger.error(f"❌ JSON error для {city_id}, група {group_num}")
-                continue
+                                logger.error(f"❌ Помилка надсилання користувачу {user['user_id']}: {e}")
+
+    logger.info(f"🔔 Надіслано {notifications_sent} сповіщень")
 
 
-async def main():
-    logger.info("🚀 Запуск бота...")
+# Планувальник задач
+def setup_scheduler(bot: Bot) -> AsyncIOScheduler:
+    """Налаштування автоматичних задач"""
+    scheduler = AsyncIOScheduler(timezone="Europe/Kiev")
 
-    init_db()
-
-    bot = Bot(token=BOT_TOKEN)
-    dp = Dispatcher(storage=MemoryStorage())
-    dp.include_router(router)
-
-    # Scheduler
-    scheduler = AsyncIOScheduler()
-
-    # Оновлення графіків кожні 30 хвилин
+    # Оновлення графіків кожні 6 годин
     scheduler.add_job(
         update_schedules,
-        CronTrigger(minute="*/30"),
-        args=[bot]
+        CronTrigger(hour="*/6"),
+        args=[bot, False],
+        id="update_schedules",
+        replace_existing=True
     )
 
     # Перевірка сповіщень кожні 15 хвилин
     scheduler.add_job(
         send_notifications,
         CronTrigger(minute="*/15"),
-        args=[bot]
+        args=[bot],
+        id="send_notifications",
+        replace_existing=True
     )
 
+    logger.info("⏰ Планувальник налаштовано")
+    return scheduler
+
+
+# Головна функція
+async def main():
+    # Ініціалізація
+    init_db()
+
+    bot = Bot(token=BOT_TOKEN)
+    dp = Dispatcher(storage=MemoryStorage())
+    dp.include_router(router)
+
+    # Планувальник
+    scheduler = setup_scheduler(bot)
     scheduler.start()
-    logger.info("⏰ Scheduler запущено")
 
-    # Перше оновлення
-    logger.info("📥 Виконую перше оновлення графіків...")
+    # Перше оновлення при запуску
+    logger.info("🚀 Перше оновлення графіків...")
+    await update_schedules(bot, force=True)
+
+    logger.info("🤖 Бот запущено!")
+
     try:
-        await update_schedules(bot)
-        logger.info("✅ Перше оновлення завершено")
-    except Exception as e:
-        logger.error(f"❌ Помилка при першому оновленні: {e}", exc_info=True)
-
-    logger.info("✅ Бот запущено!")
-    logger.info(f"🏙 Підтримка міст: {', '.join([c['name'] for c in CITIES.values()])}")
-
-    await dp.start_polling(bot)
+        await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
+    finally:
+        await bot.session.close()
+        scheduler.shutdown()
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        logger.info("🛑 Бот зупинено")
