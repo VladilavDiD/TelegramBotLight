@@ -12,7 +12,9 @@ from urllib.parse import urljoin, quote_plus
 import aiohttp
 from bs4 import BeautifulSoup
 
+# Імпортуємо ОБИДВІ версії: асинхронну (для потоку) і синхронну
 from playwright.async_api import async_playwright, TimeoutError as PlaywrightTimeoutError
+from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutErrorSync
 from aiogram import Bot, Dispatcher, F, Router
 from aiogram.filters import Command
 from aiogram.fsm.state import State, StatesGroup
@@ -1069,7 +1071,7 @@ async def update_schedules(bot: Bot):
 
 
 async def check_and_notify_image_changes(bot: Bot):
-    """НОВИЙ ПЛАНУВАЛЬНИК: Перевірка змін у графіках-зображеннях (Хмельницький/Кам'янець)"""
+    """ВИПРАВЛЕНО: Перевірка змін у графіках-зображеннях (Хмельницький/Кам'янець)"""
     logger.info("📸 Перевірка оновлень зображень графіків...")
 
     for city_id, city_data in CITIES.items():
@@ -1077,24 +1079,63 @@ async def check_and_notify_image_changes(bot: Bot):
             continue
 
         city_name = city_data['name']
+
+        # КРИТИЧНО: Отримуємо старий URL ДО оновлення
         old_url = ScheduleParser._get_image_url(city_id)
 
-        # Викликаємо fetch_schedule для оновлення URL у базі даних
-        await ScheduleParser.fetch_schedule(city_id)
+        # Парсимо сайт та отримуємо новий URL (БЕЗ збереження в БД)
+        try:
+            url = city_data['schedule_url']
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+                'Cache-Control': 'no-cache'
+            }
 
-        # Отримуємо оновлений URL з бази даних
-        new_url = ScheduleParser._get_image_url(city_id)
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url, headers=headers, timeout=30) as response:
+                    if response.status != 200:
+                        logger.warning(f"[{city_id}] Не вдалося завантажити сторінку (статус {response.status})")
+                        continue
 
-        if not new_url:
+                    html = await response.text()
+                    soup = BeautifulSoup(html, 'html.parser')
+
+                    # Шукаємо зображення з графіком
+                    images = soup.find_all('img', src=re.compile(r'(grafik|schedule|vidkl|pogod|jpg|jpeg|png)', re.I))
+
+                    if not images:
+                        logger.warning(f"[{city_id}] Зображення графіку не знайдено на сторінці")
+                        continue
+
+                    img_url = images[0].get('src')
+                    # Формуємо повний URL
+                    if not img_url.startswith('http'):
+                        img_url = urljoin(url, img_url)
+
+                    new_url = img_url
+                    logger.info(f"[{city_id}] Поточний URL: {new_url}")
+
+        except Exception as e:
+            logger.error(f"[{city_id}] Помилка при отриманні URL зображення: {e}", exc_info=True)
             continue
 
-        # Порівнюємо старий та новий URL
+        # ПЕРЕВІРКА НА ЗМІНИ
         if old_url and old_url != new_url:
-            logger.info(f"[{city_id}] ЗНАЙДЕНО ЗМІНУ ГРАФІКУ! {old_url} -> {new_url}")
+            logger.info(f"[{city_id}] 🔥 ЗНАЙДЕНО ЗМІНУ ГРАФІКУ! {old_url} -> {new_url}")
 
+            # ЗБЕРІГАЄМО новий URL
+            ScheduleParser._save_image_url(city_id, new_url)
+
+            # НАДСИЛАЄМО СПОВІЩЕННЯ
             users_to_notify = UserManager.get_users_by_city(city_id)
+
+            if not users_to_notify:
+                logger.info(f"[{city_id}] Немає користувачів для сповіщення")
+                continue
+
             caption = f"⚠️ **ОНОВЛЕННЯ ГРАФІКУ!** ({city_name})\n\nАктуальний графік відключень змінився. Перевірте нове зображення."
 
+            notification_count = 0
             for user in users_to_notify:
                 try:
                     await bot.send_photo(
@@ -1102,12 +1143,25 @@ async def check_and_notify_image_changes(bot: Bot):
                         photo=new_url,
                         caption=caption,
                     )
+                    notification_count += 1
+                    logger.info(f"[{city_id}] ✅ Сповіщення надіслано користувачу {user['user_id']}")
                 except Exception as e:
-                    logger.error(
-                        f"❌ Помилка надсилання сповіщення про зміну графіку (зображення) {user['user_id']}: {e}")
+                    logger.error(f"[{city_id}] ❌ Помилка надсилання сповіщення користувачу {user['user_id']}: {e}")
+
+            logger.info(f"[{city_id}] 📤 Надіслано {notification_count}/{len(users_to_notify)} сповіщень")
 
         elif not old_url and new_url:
+            # Перше збереження (не надсилаємо сповіщення)
             logger.info(f"[{city_id}] Зображення вперше збережено: {new_url}")
+            ScheduleParser._save_image_url(city_id, new_url)
+
+        elif old_url and old_url == new_url:
+            logger.info(f"[{city_id}] URL не змінився")
+
+        else:
+            logger.warning(f"[{city_id}] Не вдалося визначити стан (old_url={old_url}, new_url={new_url})")
+
+    logger.info("📸 Перевірка зображень завершена")
 
 
 async def send_notifications(bot: Bot):
