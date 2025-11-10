@@ -4,7 +4,7 @@
     <option name="autoReloadType" value="SELECTIVE" />
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="daf64348-2031-4f25-ba8c-f28339a70498" name="Changes" comment="fix">
+    <list default="true" id="daf64348-2031-4f25-ba8c-f28339a70498" name="Changes" comment="fix for khm and kp">
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/main.py" beforeDir="false" afterPath="$PROJECT_DIR$/main.py" afterDir="false" />
     </list>
@@ -68,7 +68,8 @@
       <workItem from="1762255702409" duration="9017000" />
       <workItem from="1762327241060" duration="20381000" />
       <workItem from="1762416666365" duration="36000" />
-      <workItem from="1762514437210" duration="489000" />
+      <workItem from="1762514437210" duration="5828000" />
+      <workItem from="1762772553839" duration="487000" />
     </task>
     <task id="LOCAL-00001" summary="create new telegram bot for check light in home">
       <option name="closed" value="true" />
@@ -270,7 +271,15 @@
       <option name="project" value="LOCAL" />
       <updated>1762353820966</updated>
     </task>
-    <option name="localTasksCounter" value="26" />
+    <task id="LOCAL-00026" summary="fix for khm and kp">
+      <option name="closed" value="true" />
+      <created>1762515100027</created>
+      <option name="number" value="00026" />
+      <option name="presentableId" value="LOCAL-00026" />
+      <option name="project" value="LOCAL" />
+      <updated>1762515100027</updated>
+    </task>
+    <option name="localTasksCounter" value="27" />
     <servers />
   </component>
   <component name="TypeScriptGeneratedFilesManager">
@@ -311,6 +320,7 @@
     <MESSAGE value="Use system Chromium provided by Nixpacks" />
     <MESSAGE value="update parse che" />
     <MESSAGE value="fix" />
-    <option name="LAST_COMMIT_MESSAGE" value="fix" />
+    <MESSAGE value="fix for khm and kp" />
+    <option name="LAST_COMMIT_MESSAGE" value="fix for khm and kp" />
   </component>
 </project>
